@@ -18,7 +18,7 @@ completed (qid, system_y, judge_model) keys.
 
 Usage:
   python -m scripts.judge_families --run results/run_20260708_v4 \\
-      --queries data/main_queries.jsonl data/realtime_20260708.jsonl \\
+      --queries data/main_queries.jsonl data/realtime_YYYYMMDD.jsonl \\
       --n 40 --concurrency 8
 """
 from __future__ import annotations

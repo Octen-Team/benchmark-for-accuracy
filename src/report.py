@@ -1,8 +1,8 @@
 """Slice reports and run-to-run diff.
 
 Usage:
-  python -m src.report --run results/run_20260707 --queries data/seed_queries.jsonl
-  python -m src.report --run results/run_20260714 --baseline results/run_20260707 --queries data/seed_queries.jsonl
+  python -m src.report --run results/run_20260707 --queries data/main_queries.jsonl
+  python -m src.report --run results/run_20260714 --baseline results/run_20260707 --queries data/main_queries.jsonl
 
 Output:
   1. Overall win-rate table (ours vs each competitor: win/tie/loss, plus a second look excluding low-confidence)

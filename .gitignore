@@ -11,5 +11,16 @@ data/simpleqa_verified.jsonl
 data/simpleqa_full.jsonl
 data/freshqa.jsonl
 
+# your own query sets + their gold/rubric sidecars (built by query_synth → gold_resolver →
+# rubric_gen → rubric_review; nothing hand-built ships here)
+data/main_queries.jsonl
+data/seed_queries.jsonl
+data/anchor_queries.jsonl
+data/benchmark_queries.jsonl
+data/realtime_*.jsonl
+data/rubrics.jsonl
+data/rubric_reviews.jsonl
+data/synth_*.jsonl
+
 # local trend artifact (not shipped)
 data/run_history.jsonl

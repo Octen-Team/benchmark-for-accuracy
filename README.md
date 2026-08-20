@@ -106,12 +106,14 @@ backend gaps. They differ by 10–20pp, so always state which. Override models w
 
 ### 2 · Build your own query set
 
-A 200-query set already ships in `data/main_queries.jsonl`. To grow it, the order is fixed —
-**synth → gold → rubrics → review → merge**:
+No query set ships with the repo — `data/` holds only the open-source benchmark CSVs under
+`data/datasets/`. Build your own; the order is fixed — **synth → gold → rubrics → review → merge**,
+and the merge target (`data/main_queries.jsonl` below) is what the next section evaluates:
 
 ```bash
 python -m src.query_synth --topic "vector databases" --n 15 --vertical tech_code \
-    --out data/synth_gen.jsonl --dedup-against data/main_queries.jsonl   # or query_intake for raw lists
+    --out data/synth_gen.jsonl   # or query_intake for raw lists
+# once you have a set, add --dedup-against data/main_queries.jsonl to keep rounds disjoint
 python -m src.gold_resolver --queries data/synth_gen.jsonl --concurrency 4
 python -m src.rubric_gen    --queries data/synth_gen.jsonl --concurrency 4
 python -m src.rubric_review --queries data/synth_gen.jsonl --concurrency 4 --yes

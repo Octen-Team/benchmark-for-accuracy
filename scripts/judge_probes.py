@@ -21,7 +21,7 @@ and re-running skips completed (qid, base_backend, probe) keys.
 
 Usage:
   python -m scripts.judge_probes --run results/run_20260708_v4 \\
-      --queries data/main_queries.jsonl data/realtime_20260708.jsonl \\
+      --queries data/main_queries.jsonl data/realtime_YYYYMMDD.jsonl \\
       --n 30 --concurrency 8
 """
 from __future__ import annotations

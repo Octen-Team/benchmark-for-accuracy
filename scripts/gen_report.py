@@ -6,7 +6,7 @@ src/report.py so the numbers cannot drift from the console report.
 
 Usage:
   python -m scripts.gen_report --run results/run_20260708_full \\
-      --queries data/main_queries.jsonl data/realtime_20260708.jsonl \\
+      --queries data/main_queries.jsonl data/realtime_YYYYMMDD.jsonl \\
       [--agent-run results/agent_run_20260707_full] [--baseline results/run_XXXX] \\
       [--out results/run_20260708_full/20260708_general_REPORT.md]
 """

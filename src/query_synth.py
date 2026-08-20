@@ -18,7 +18,7 @@ Hard rule: a synthesized set must get per-query rubrics (rubric_gen --only-missi
 Usage:
   python -m src.query_synth --topic "cross-border e-commerce logistics" --n 40 \\
       --lang "zh-CN=0.7,en=0.3" --out data/synth_ecomm_logistics.jsonl \\
-      --dedup-against data/seed_queries.jsonl
+      --dedup-against data/main_queries.jsonl
   python -m src.gold_resolver --queries data/synth_ecomm_logistics.jsonl   # then resolve anchors
 """
 from __future__ import annotations

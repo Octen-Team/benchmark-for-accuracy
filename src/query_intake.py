@@ -2,7 +2,7 @@
 
 Usage:
   python -m src.query_intake --input raw_queries.txt --out data/intake_batch1.jsonl \
-      --dedup-against data/seed_queries.jsonl
+      --dedup-against data/main_queries.jsonl
   python -m src.query_intake --report data/intake_batch1.jsonl        # six-dimension quota distribution only
   python -m src.query_intake --input raw.csv --out ... --batch-size 10
 

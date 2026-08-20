@@ -1,8 +1,8 @@
 """Automatic per-query rubric generation.
 
 Usage:
-  python -m src.rubric_gen --queries data/seed_queries.jsonl --out data/rubrics.jsonl
-  python -m src.rubric_gen --queries data/seed_queries.jsonl --out data/rubrics.jsonl --force  # full regen
+  python -m src.rubric_gen --queries data/main_queries.jsonl --out data/rubrics.jsonl
+  python -m src.rubric_gen --queries data/main_queries.jsonl --out data/rubrics.jsonl --force  # full regen
 
 Mechanics:
 - Each rubric record carries query_sha (hash of the query text) + rubric_version.

@@ -13,7 +13,7 @@ score  — compute agreement from 2+ annotators' downloaded label files.
 
 Usage:
   python -m scripts.calibration export --run results/run_20260708_v4 \\
-      --queries data/main_queries.jsonl data/realtime_20260708.jsonl --n 80
+      --queries data/main_queries.jsonl data/realtime_YYYYMMDD.jsonl --n 80
   # → results/run_20260708_v4/calibration.html  (send to annotators)
   python -m scripts.calibration score --run results/run_20260708_v4 \\
       --labels labels_alice.jsonl labels_bob.jsonl
