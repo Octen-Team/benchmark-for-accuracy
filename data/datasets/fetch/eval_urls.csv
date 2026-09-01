@@ -1,0 +1,101 @@
+#,category,url
+1,Static Docs,https://en.wikipedia.org/wiki/Large_language_model
+2,Static Docs,https://docs.python.org/3/library/asyncio-task.html
+3,Static Docs,https://developer.mozilla.org/en-US/docs/Web/API/Window/fetch
+4,Static Docs,https://docs.stripe.com/api/charges
+5,Static Docs,https://hub.docker.com/_/postgres
+6,Static Docs,https://pypi.org/project/requests/
+7,Static Docs,https://www.rfc-editor.org/rfc/rfc2616.txt
+8,Static Docs,https://en.wikipedia.org/wiki/Transformer_(deep_learning_architecture)
+9,E-commerce/SPA,https://www.amazon.com/dp/0593655036
+10,E-commerce/SPA,https://www.nike.com/t/air-force-1-07-mens-shoes-5QFp5Z/CW2288-111
+11,E-commerce/SPA,https://www.ebay.com/b/Laptops-Netbooks/175672
+12,E-commerce/SPA,https://www.target.com/p/-/A-85978622
+13,E-commerce/SPA,https://www.walmart.com/search?q=airpods
+14,E-commerce/SPA,https://www.bestbuy.com/site/apple-macbook-air-13-inch-laptop-m4-chip-16gb-memory-256gb-ssd-midnight/6602763.p?skuId=6602763
+15,E-commerce/SPA,https://www.allbirds.com/products/mens-wool-runners
+16,E-commerce/SPA,https://www.etsy.com/search?q=handmade+mug
+17,E-commerce/SPA,https://coinmarketcap.com/currencies/bitcoin/
+18,E-commerce/SPA,https://finance.yahoo.com/quote/AAPL/
+19,E-commerce/SPA,https://www.booking.com/hotel/us/the-ritz-carlton-san-francisco.html
+20,E-commerce/SPA,https://www.airbnb.com/s/San-Francisco--CA/homes
+21,E-commerce/SPA,https://www.figma.com/community
+22,E-commerce/SPA,https://www.aliexpress.com/w/wholesale-laptop.html
+23,E-commerce/SPA,https://www.rakuten.co.jp/
+24,E-commerce/SPA,https://www.coupang.com/
+25,E-commerce/SPA,https://listado.mercadolibre.com.ar/laptop
+26,E-commerce/SPA,https://www.noon.com/uae-en/
+27,Defended (WAF/Reviews/Paywall),https://www.trustpilot.com/review/www.amazon.com
+28,Defended (WAF/Reviews/Paywall),https://www.indeed.com/cmp/Google
+29,Defended (WAF/Reviews/Paywall),https://medium.com/tag/artificial-intelligence
+30,Defended (WAF/Reviews/Paywall),https://www.reuters.com/technology/
+31,Defended (WAF/Reviews/Paywall),https://www.producthunt.com/
+32,Defended (WAF/Reviews/Paywall),https://www.tripadvisor.com/Restaurants-g60713-San_Francisco_California.html
+33,Defended (WAF/Reviews/Paywall),https://www.bbb.org/us/ca/san-francisco
+34,Defended (WAF/Reviews/Paywall),https://www.leboncoin.fr/
+35,Defended (WAF/Reviews/Paywall),https://www.g2.com/products/notion/reviews
+36,Defended (WAF/Reviews/Paywall),https://www.capterra.com/p/186596/Slack/reviews/
+37,Defended (WAF/Reviews/Paywall),https://www.reddit.com/r/MachineLearning/
+38,Defended (WAF/Reviews/Paywall),https://www.reddit.com/r/LocalLLaMA/comments/1vkmhyl/best_local_llms_august_2026/
+39,Defended (WAF/Reviews/Paywall),https://www.quora.com/What-is-the-best-way-to-learn-Python
+40,Defended (WAF/Reviews/Paywall),https://stackoverflow.com/questions/11227809/
+41,Defended (WAF/Reviews/Paywall),https://math.stackexchange.com/questions/733754/
+42,Defended (WAF/Reviews/Paywall),https://www.yelp.com/biz/tartine-bakery-san-francisco
+43,Defended (WAF/Reviews/Paywall),https://www.glassdoor.com/Reviews/Google-Reviews-E9079.htm
+44,Defended (WAF/Reviews/Paywall),https://www.goodreads.com/book/show/2767052-the-hunger-games
+45,Defended (WAF/Reviews/Paywall),https://qiita.com/RYA234/items/df8966da91fac3cc736e
+46,Defended (WAF/Reviews/Paywall),https://habr.com/ru/articles/1073372/
+47,Defended (WAF/Reviews/Paywall),https://www.crunchbase.com/organization/openai
+48,Defended (WAF/Reviews/Paywall),https://www.ticketmaster.com/taylor-swift-tickets/artist/1094215
+49,Defended (WAF/Reviews/Paywall),https://www.zillow.com/san-francisco-ca/
+50,Defended (WAF/Reviews/Paywall),https://www.wsj.com/tech
+51,Defended (WAF/Reviews/Paywall),https://www.nytimes.com/section/technology
+52,Defended (WAF/Reviews/Paywall),https://www.sciencedirect.com/science/article/pii/S0140673620301835
+53,Defended (WAF/Reviews/Paywall),https://seatgeek.com/taylor-swift-tickets
+54,Defended (WAF/Reviews/Paywall),https://www.idealo.de/
+55,Social/Login,https://www.linkedin.com/in/reidhoffman/
+56,Social/Login,https://www.linkedin.com/company/anthropicresearch/
+57,Social/Login,https://x.com/AnthropicAI
+58,Social/Login,https://www.instagram.com/nasa/
+59,Social/Login,https://www.facebook.com/NASA/
+60,Social/Login,https://www.threads.com/@nasa
+61,Social/Login,https://www.tiktok.com/@nasa
+62,Social/Login,https://www.pinterest.com/nasa/
+63,Social/Login,https://bsky.app/profile/nasa.gov
+64,Social/Login,https://x.com/OpenAI
+65,Documents,https://arxiv.org/pdf/1706.03762.pdf
+66,Documents,https://arxiv.org/pdf/2005.14165.pdf
+67,Documents,https://proceedings.neurips.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf
+68,Documents,https://getsamplefiles.com/download/pdf/sample-1.pdf
+69,Documents,https://www.irs.gov/pub/irs-pdf/f1040.pdf
+70,Documents,https://www.uscis.gov/sites/default/files/document/forms/i-9.pdf
+71,Documents,https://github.com/py-pdf/sample-files/raw/main/003-pdflatex-image/pdflatex-image.pdf
+72,Documents,https://calibre-ebook.com/downloads/demos/demo.docx
+73,Documents,https://filesamples.com/samples/document/docx/sample1.docx
+74,Documents,https://github.com/PHPOffice/PhpSpreadsheet/raw/master/samples/templates/26template.xlsx
+75,Documents,https://go.microsoft.com/fwlink/?LinkID=521962
+76,Documents,https://getsamplefiles.com/download/pptx/sample-1.pptx
+77,Documents,https://getsamplefiles.com/download/pptx/sample-2.pptx
+78,Documents,https://raw.githubusercontent.com/datasets/gdp/master/data/gdp.csv
+79,Documents,https://raw.githubusercontent.com/datasets/covid-19/main/data/countries-aggregated.csv
+80,Documents,https://api.github.com/repos/vercel/next.js
+81,Documents,https://jsonplaceholder.typicode.com/comments
+82,Documents,https://wordpress.org/sitemap.xml
+83,Documents,https://feeds.bbci.co.uk/news/rss.xml
+84,Documents,https://go.dev/blog/feed.atom
+85,Documents,https://www.gutenberg.org/files/1342/1342-0.txt
+86,Robustness,https://arxiv.org/pdf/1706.03762
+87,Robustness,https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679
+88,Robustness,https://www.w3.org/TR/html52/
+89,Robustness,https://httpbingo.org/redirect/3
+90,Robustness,https://example.com/
+91,Robustness,https://httpbingo.org/status/404
+92,Robustness,https://httpbingo.org/status/503
+93,Robustness,https://www.aozora.gr.jp/cards/000148/files/773_14560.html
+94,Robustness,http://www.cs.cmu.edu/~rgs/alice-I.html
+95,Robustness,http://www.textfiles.com/computers/
+96,Defended (WAF/Reviews/Paywall),https://www.sitejabber.com/reviews/amazon.com
+97,Defended (WAF/Reviews/Paywall),https://www.wikihow.com/Main-Page
+98,Defended (WAF/Reviews/Paywall),https://www.bloomberg.com/technology
+99,Defended (WAF/Reviews/Paywall),https://www.barrons.com/
+100,Documents,https://raw.githubusercontent.com/facebook/react/main/README.md

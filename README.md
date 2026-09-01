@@ -145,6 +145,51 @@ python -m src.agent_eval --queries data/main_queries.jsonl --backends octen exa 
     --k 8 --max-searches 3 --out results/agent_$(date +%Y%m%d) --limit 10
 ```
 
+### 4 · Evaluate fetch/extract providers
+
+A separate lane that scores **fetch capability** — can a provider retrieve the page at all —
+sliced by page type, anti-bot wall type, protection strength, document format, and robustness
+probes. It does not score parsing quality. The headline metric is one weighted fetch success
+rate (1.0 retrieved / 0.5 partial / 0 lost), and every metric in the report is ranked
+best-to-worst.
+
+```bash
+pip install -r requirements-fetch.txt      # optional deps; the core stays requests-only
+python -m playwright install chromium      # only for the browser ground-truth channel
+
+# 1) Turn a URL list (url,category) into a typed page set
+python -m scripts.fetch_pageset_build --csv data/datasets/fetch/eval_urls.csv \
+    --out data/fetch_pageset.jsonl
+
+# 2) Ground truth: parse channel for documents, headless browser for the rest.
+#    Writes a page set enriched with the vocabulary each verdict is measured against.
+python -m scripts.fetch_gt_build --pageset data/fetch_pageset.jsonl \
+    --out data/fetch_pageset.gt.jsonl --channel playwright_headless --concurrency 4
+
+# 3) Fetch. Missing keys mark a provider unavailable rather than failing it.
+python -m src.fetch_run --pageset data/fetch_pageset.gt.jsonl \
+    --providers octen exa tavily firecrawl trafilatura readability \
+    --out results/fetch_run --concurrency 6 --timeout 60 \
+    --pace octen=2.5,firecrawl=6.5
+
+# 4) Judge each cell: mechanical checks first, then a three-model blind panel
+python -m scripts.fetch_score_run --extractions results/fetch_run/extractions.jsonl \
+    --pageset data/fetch_pageset.gt.jsonl \
+    --out results/fetch_run/verdicts.jsonl --concurrency 8
+
+# 5) Report
+python -m scripts.fetch_report --verdicts results/fetch_run/verdicts.jsonl \
+    --pageset data/fetch_pageset.gt.jsonl \
+    --out-md results/fetch_run/report.md --out-html results/fetch_run/report.html
+```
+
+Pacing is not optional — several providers reject requests at a faster cadence, and an
+unpaced round measures rate limits instead of fetch capability. Ground truth is layered and
+each page records which channel produced it, so pages whose GT is missing or itself blocked
+are reported as such instead of being silently scored against a wall.
+
+Method and metric definitions: [`docs/benchmarks/fetch_eval.md`](docs/benchmarks/fetch_eval.md).
+
 ## License
 
 [MIT](LICENSE) © 2026 Octen.
