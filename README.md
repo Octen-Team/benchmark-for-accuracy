@@ -180,7 +180,9 @@ Pacing is not optional: several providers reject requests at a faster cadence, a
 unpaced round measures rate limits instead of fetch capability. Pages where the ground
 truth is missing or was itself blocked are reported as such rather than silently scored.
 
-Building your own page set, and the full method: see
+Results from the reference run:
+[`docs/benchmarks/fetch_20260901.md`](docs/benchmarks/fetch_20260901.md).
+Building your own page set, and the full method:
 [`docs/benchmarks/fetch_eval.md`](docs/benchmarks/fetch_eval.md).
 
 ## License
