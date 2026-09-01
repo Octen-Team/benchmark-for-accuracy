@@ -36,3 +36,13 @@ python -m src.agent_eval --queries data/simpleqa_full.jsonl \
 python -m scripts.benchmark_report --run results/simpleqa
 ```
 (benchmark sets default to `minimax/minimax-m2.5` for generator + judge, matching the above.)
+
+---
+
+## Fetch / extract providers
+
+[`fetch_20260901.md`](fetch_20260901.md) — 11 providers over 100 pages, scoring **fetch
+capability only**: was the page retrieved. Sliced by page type, anti-bot wall type,
+protection strength, document format and robustness probes. The page set and its ground
+truth ship in `data/datasets/fetch/`, so the run reproduces from this repository; the
+method is in [`fetch_eval.md`](fetch_eval.md).

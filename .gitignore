@@ -24,3 +24,9 @@ data/synth_*.jsonl
 
 # local trend artifact (not shipped)
 data/run_history.jsonl
+
+# fetch lane build outputs (page set + ground truth, built by scripts/fetch_pageset_build.py
+# → scripts/fetch_gt_build.py; the source URL list is in data/datasets/fetch/)
+data/fetch_pageset*.jsonl
+data/fetch_gt_*.jsonl
+data/my_pageset*.jsonl

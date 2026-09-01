@@ -145,6 +145,46 @@ python -m src.agent_eval --queries data/main_queries.jsonl --backends octen exa 
     --k 8 --max-searches 3 --out results/agent_$(date +%Y%m%d) --limit 10
 ```
 
+### 4 · Evaluate fetch/extract providers
+
+A separate lane that scores **fetch capability** — can a provider retrieve the page at all
+— sliced by page type, anti-bot wall type, protection strength, document format and
+robustness probes. It does not score parsing quality. The headline is one weighted fetch
+success rate (1.0 retrieved / 0.5 partial / 0 lost).
+
+**The benchmark ships built.** `data/datasets/fetch/pageset.gt.jsonl` holds 100 pages
+together with the ground truth every verdict is measured against, so three commands
+produce a report. No browser required.
+
+```bash
+pip install -r requirements-fetch.txt
+export SET=data/datasets/fetch/pageset.gt.jsonl
+export RUN=results/fetch_run
+
+# Fetch. A provider you have no key for is reported as unavailable, never scored zero.
+python -m src.fetch_run --pageset $SET \
+    --providers octen exa tavily firecrawl trafilatura readability \
+    --out $RUN --concurrency 6 --timeout 60
+
+# Judge: mechanical checks first, then a three-model blind panel for what they cannot
+# settle. Each provider is judged on its own return. --no-panel spends no LLM tokens.
+python -m scripts.fetch_score_run --pageset $SET \
+    --extractions $RUN/extractions.jsonl --out $RUN/verdicts.jsonl --concurrency 8
+
+# Report: Markdown, JSON and a standalone HTML page.
+python -m scripts.fetch_report --pageset $SET --verdicts $RUN/verdicts.jsonl \
+    --out-md $RUN/report.md --out-html $RUN/report.html --out-json $RUN/agg.json
+```
+
+Rate limiting is retried with backoff rather than paced around, so a provider that
+throttles is not scored down for it. Pages where the ground truth is missing or was itself
+blocked are reported as such rather than silently scored.
+
+Results from the reference run:
+[`docs/benchmarks/fetch_20260901.md`](docs/benchmarks/fetch_20260901.md).
+Building your own page set, and the full method:
+[`docs/benchmarks/fetch_eval.md`](docs/benchmarks/fetch_eval.md).
+
 ## License
 
 [MIT](LICENSE) © 2026 Octen.
