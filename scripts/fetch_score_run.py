@@ -1,7 +1,8 @@
-"""判定驱动：抽取结果 + 带 GT 的页面集 -> verdicts.jsonl。
+"""Judging driver: extractions + a page set with ground truth -> verdicts.jsonl.
 
-逐条落盘、按 (pid, provider, run_seq) 续跑；面板裁决按指纹缓存，重跑不重复烧 token。
-`--no-panel` 只跑机械层（不花 LLM 钱，用于验通路）。
+Rows are appended one at a time and resume on (pid, provider, run_seq). Panel rulings are
+cached by fingerprint, so a re-run does not spend tokens twice. `--no-panel` runs the
+mechanical layer alone, which costs nothing and is useful for checking the wiring.
 """
 from __future__ import annotations
 
@@ -16,9 +17,9 @@ from src.fetch_score import GoldStore, PanelCache, score_one, score_page_cross
 
 
 def load_jsonl(p: Path) -> list[dict]:
-    # **按 "\n" 切，不能用 splitlines()**：后者还会在 U+2028 / U+2029 / U+0085 上切，
-    # 而那些字符在网页正文里合法出现、json.dumps 也不转义 —— 一条完整记录会被从
-    # 中间劈开，报出一个看不懂的 "Unterminated string"。实测 500 条抓取里就有。
+    # **Split on "\n" only — never splitlines().** The latter also splits on U+2028,
+    # U+2029 and U+0085, which occur legitimately in page text and which json.dumps does
+    # not escape. One record gets torn in half and surfaces as "Unterminated string".
     return [json.loads(l) for l in p.read_text(encoding="utf-8").split("\n") if l.strip()]
 
 
@@ -46,23 +47,25 @@ def resolve_panel(override: list[str] | None):
     panel = [next((c for c in cands if c in ids), None) for cands in PANEL_PREFS.values()]
     panel = [p for p in panel if p]
     if len(panel) < 3:
-        # 三 family 三模型是设计要求；凑不齐要喊出来而不是悄悄用两家
-        raise RuntimeError("解析不出 3 个 family 的面板，只拿到: %s" % panel)
+        # Three models from three families is a design requirement; falling back to two
+        # silently would weaken the panel without anyone noticing
+        raise RuntimeError("could not resolve a panel spanning 3 families; got: %s" % panel)
     return panel
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--extractions", required=True)
-    ap.add_argument("--pageset", required=True, help="带 gt 的页面集")
+    ap.add_argument("--pageset", required=True, help="page set carrying ground truth")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--no-panel", action="store_true", help="只跑机械层，不花 LLM 钱")
-    ap.add_argument("--panel", nargs="+", help="覆盖面板模型")
+    ap.add_argument("--no-panel", action="store_true",
+                    help="mechanical layer only; spends no LLM tokens")
+    ap.add_argument("--panel", nargs="+", help="override the panel models")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--gold", default="data/fetch_gold_gap.jsonl",
-                    help="人工核过的结论，优先级最高；文件不存在则跳过")
+                    help="human-verified verdicts, highest priority; skipped if absent")
     ap.add_argument("--concurrency", type=int, default=6,
-                    help="并发判定的格数（每格内部三个模型仍顺序调）")
+                    help="cells judged concurrently (the three models within a cell\n                         still run in sequence)")
     a = ap.parse_args()
 
     pages = {p["pid"]: p for p in load_jsonl(Path(a.pageset))}
@@ -77,10 +80,11 @@ def main() -> None:
 
     gold = GoldStore(a.gold)
     if len(gold):
-        print("金标 %d 条（人工核过，优先级最高，覆盖面板）" % len(gold))
+        print("%d gold entries (human-verified, highest priority, override the panel)"
+              % len(gold))
     panel = None if a.no_panel else resolve_panel(a.panel)
     cache = None if a.no_panel else PanelCache(out.parent / "panel_cache.jsonl")
-    print("待判 %d 格（共 %d）；面板 = %s" % (len(todo), len(rows), panel or "关"))
+    print("%d cells to judge (of %d); panel = %s" % (len(todo), len(rows), panel or "off"))
 
     def _crashed(r: dict, e: Exception) -> dict:
         p = pages[r["pid"]]
@@ -99,8 +103,10 @@ def main() -> None:
         except Exception as e:                   # noqa: BLE001
             return _crashed(r, e)
 
-    # **没有参考答案的页整页一起判**：五家的返回并排给面板，只要有一家真拿到了，
-    # 其余的错就现形。既比单家裸判准，又把 N 家 N 次调用降成 1 次。
+    # **Pages with no reference answer are judged whole.** Every provider's return is
+    # shown side by side, so as soon as one of them genuinely got the page the others'
+    # failures become visible. More accurate than judging each alone, and N providers
+    # cost one call instead of N.
     gap_pids = {pid for pid, p in pages.items() if (p.get("gt") or {}).get("gt_gap")}
     cross_todo: dict[str, dict] = {}
     solo_todo = []
@@ -110,7 +116,8 @@ def main() -> None:
         else:
             solo_todo.append(r)
     if cross_todo:
-        print("其中 %d 页无参考 -> 整页交叉判（%d 格，%d 次调用而不是 %d 次）"
+        print("  %d of them have no reference -> cross-judged whole "
+              "(%d cells, %d calls instead of %d)"
               % (len(cross_todo), sum(len(v) for v in cross_todo.values()),
                  len(cross_todo) * len(panel),
                  sum(len(v) for v in cross_todo.values()) * len(panel)))
@@ -139,10 +146,10 @@ def main() -> None:
 
     allv = load_jsonl(out)
     from collections import Counter
-    print("\n判定分布: %s" % Counter(v["verdict"] for v in allv))
-    print("判不了 %d 格（如实留空，不当 0 分）"
+    print("\nverdict distribution: %s" % Counter(v["verdict"] for v in allv))
+    print("%d cells unjudged (left genuinely blank, never scored as zero)"
           % sum(1 for v in allv if v["verdict"] is None))
-    print("dishonest %d · 三方分歧 %d"
+    print("dishonest %d · panel splits %d"
           % (sum(1 for v in allv if v.get("dishonest")),
              sum(1 for v in allv if v.get("panel_split"))))
 

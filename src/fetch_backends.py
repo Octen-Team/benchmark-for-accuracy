@@ -1,19 +1,23 @@
-"""13 家 fetch/extract provider 的 adapter。
+"""Adapters for the fetch/extract providers.
 
-**不放进 `src/backends.py`**：那边的抽象是 `search(query, k)`，这边是 `fetch(url)`，
-焊在一起两边都会变形。
+**Deliberately separate from the search backends.** That abstraction is
+`search(query, k)`; this one is `fetch(url)`. Welding them together distorts both.
 
-三条纪律：
+Three rules:
 
-  缺 key 硬失败      静默跳过会跑出"整轮零覆盖而报告显示零故障" —— 正是 69b778f 修过的坑。
-  缓存新鲜度钉死     octen `max_age_seconds=300`（接口下限）、firecrawl `maxAge=0`。
-                     不钉的话延迟那一列量的是各家缓存命中率的排名，不是抓取速度（playbook 5.8）。
-  自家上限记 harness  参考报告的头条发现是"21 条失败是我们自己的代码"。`fault` 三分就是为
-                     这件事加的：harness 的锅不能记到厂商头上。
+  A missing key fails hard.   Skipping silently produces a round with zero coverage and a
+                              report showing zero faults.
+  Cache freshness is pinned.  Every adapter explicitly requests a live fetch where the
+                              API offers the knob. Unpinned, the latency column ranks
+                              cache hit rates rather than fetch speed.
+  Our own limits are harness  A size cap we imposed, or a normalizer of ours that
+  faults.                     crashed, must not be charged to the provider. That is what
+                              the `fault` field exists for.
 
-**endpoint 未核实的 7 家**（parallel / context / you / linkup / zyte / cloudflare / apify）
-只写骨架。凭印象编 endpoint 跑出来的是一整列假失败，比没有这一列更糟 —— 所以它们在缺 key 时
-抛错并同时说明"口径待核"，拿到 key 后按官方文档填 `endpoint` / `_body` / `_pluck` 三处即可。
+**Providers whose endpoint has not been verified** carry only a skeleton. Inventing an
+endpoint from memory yields a whole column of fake failures, which is worse than having
+no column at all, so they raise on a missing key and say the shape is unverified. Filling
+in `endpoint` / `_body` / `_pluck` from the official docs is all that is needed.
 """
 from __future__ import annotations
 
@@ -32,15 +36,17 @@ from .fetch_checks import len_norm as _len_norm
 
 _load_dotenv()
 
-# 远高于集合里最长的页（Gutenberg 全本约 70 万字符）。触发即记 harness 故障，不静默截断。
+# Well above the longest page in the set (a full public-domain book runs to roughly
+# 700k characters). Hitting it records a harness fault rather than truncating silently.
 MAX_TEXT_CHARS = 5_000_000
 DEFAULT_TIMEOUT = 60
 
 
 @dataclass
 class FetchResponse:
-    """一次抓取的全部结果。字段名在 fetch_run 落盘、fetch_score 消费、fetch_report 聚合
-    四处共用，改名要四处一起改。"""
+    """Everything one fetch produced. These field names are shared by the runner that
+    persists them, the scorer that consumes them and the report that aggregates them, so
+    renaming one means renaming it in all of those places."""
     url: str
     provider: str
     status: str                      # "ok" | "error"
@@ -49,36 +55,38 @@ class FetchResponse:
     latency_ms: float = 0.0
     http_status: int | None = None
     error: str | None = None
-    failure_reason: str | None = None    # 9 类之一；status=ok 时也可能有（如 our_size_cap）
+    failure_reason: str | None = None    # one of the nine; can be set even when status=ok
     fault: str | None = None             # harness | provider | page
     cache_pinned: str = "unpinned"        # pinned | no_knob | unpinned
     raw_meta: dict = field(default_factory=dict)
 
 
-# 厂商**主动拒绝服务某个域**的措辞。这和"目标站把它拦了"是两回事：
-#   blocklisted_domain  它不给你抓这个域 —— **政策选择**
-#   anti_bot_blocked    它试了，被目标站拦下 —— **能力差距**
-# 采购时含义完全不同，都塞进 anti_bot_blocked 会让"不做这门生意"看起来像"打不过"。
-# 2026-09-01 实测：firecrawl 全部 11 条 403 都是政策拒绝（"We do not support this
-# site"），一条真实反爬失败都没有；换 proxy=stealth 也一样拒。
+# Wording that means the provider **refuses to serve a domain by policy**. That is a
+# different thing from the target site blocking it:
+#   blocklisted_domain  it will not fetch this domain for you — a **policy choice**
+#   anti_bot_blocked    it tried and the target site stopped it — a **capability gap**
+# For anyone choosing a provider these mean opposite things. Folding both into
+# anti_bot_blocked makes "we do not do this business" look like "we cannot get through".
 _POLICY_REFUSAL = re.compile(
     r"do not support this site|not supported|unsupported (site|domain|url)"
     r"|blocked by (our )?policy|domain is (not allowed|blocked|blacklisted)"
     r"|we (don't|do not) (allow|scrape)", re.I)
 
 
-# 有的家把"被站点封了"包在自定义状态码里。Zyte 用 520 + `"title":"Website Ban"`，
-# 落进 `other` 会让"被拦"看起来像"不明错误"——而这两个在归因表里的含义完全不同。
+# Some providers wrap "the site banned us" in a custom status code. Left in `other`, a
+# genuine block reads as an unexplained error, and those mean different things in the
+# attribution table.
 _SITE_BAN = re.compile(r'"title"\s*:\s*"Website Ban"|website ban|banned by (the )?(site|target)',
                        re.I)
 
 
 def classify_body(code: int, body: str) -> tuple[str, str] | None:
-    """响应体里**明说**的原因，没明说返回 None 交给状态码兜底。
+    """The reason the response body **states explicitly**; None when it says nothing and
+    the status code has to decide.
 
-    这两类在归因表里的含义完全不同：
-      blocklisted_domain  它不给你抓这个域 —— 政策选择
-      anti_bot_blocked    它试了、被目标站封了 —— 能力差距
+    The two categories mean different things in the attribution table:
+      blocklisted_domain  it will not fetch this domain for you — a policy choice
+      anti_bot_blocked    it tried and the target site blocked it — a capability gap
     """
     if not body:
         return None
@@ -90,15 +98,17 @@ def classify_body(code: int, body: str) -> tuple[str, str] | None:
 
 
 def _classify_http(code: int, body: str = "") -> tuple[str, str]:
-    """HTTP 状态 -> (failure_reason, fault)。**响应体里明说的原因优先于状态码**。"""
+    """HTTP status -> (failure_reason, fault). **An explicit reason in the body wins
+    over the status code.**"""
     told = classify_body(code, body)
     if told:
         return told
     if code == 429:
         return "rate_limited", "provider"
     if code == 402:
-        # 余额不足是**我们账户的状态**，不是这家的抓取能力。记成 provider 会让它拿 0%
-        # 而看起来很差 —— 那是把我们没充值算成了它的分。
+        # An exhausted balance is **the state of our account**, not the provider's fetch
+        # capability. Charging it to the provider scores our unpaid invoice as their
+        # weakness.
         return "other", "harness"
     if code in (408, 425, 500, 502, 503, 504):
         return "timeout_upstream", "provider"
@@ -120,16 +130,18 @@ def _classify_exc(e: Exception) -> tuple[str, str]:
 
 
 class FetchProvider(ABC):
-    """一家 provider。`fetch` 永远返回 FetchResponse，**只有缺 key 才抛**。"""
+    """One provider. `fetch` always returns a FetchResponse; **only a missing key raises.**"""
     name: str = ""
     env_key: str | None = None
-    # **四态，不是布尔**：
-    #   pinned    有这个参数，且我们设成了"实时抓、不走缓存"
-    #   no_knob   已核实这家 API 没有这个参数（或它本来就每次实抓）
-    #   unknown   查不到 —— 它不校验未知参数，猜一个名字塞进去会被静默忽略，
-    #             而我们会以为缓存关掉了。查不到就如实说查不到，别装作钉住了
-    #   unpinned  有参数但我们没设（不该出现在已接线的家上）
-    # 混成布尔会让"这家没这个能力"和"我们漏设了"长得一样。
+    # **Four states, not a boolean:**
+    #   pinned    the knob exists and we set it to fetch live, bypassing the cache
+    #   no_knob   verified: this API has no such parameter (or always fetches live)
+    #   unknown   could not determine. Unknown parameters are silently ignored rather
+    #             than rejected, so guessing a name would leave us believing the cache
+    #             was off. Say "unknown" rather than pretend it is pinned.
+    #   unpinned  the knob exists and we did not set it (should not occur once wired)
+    # Collapsing this to a boolean makes "the provider lacks the capability" and "we
+    # forgot to set it" look identical.
     cache_pinned: str = "unpinned"
     endpoint_verified: bool = True
 
@@ -138,13 +150,16 @@ class FetchProvider(ABC):
             return ""
         v = os.environ.get(self.env_key, "").strip()
         if not v:
-            hint = "" if self.endpoint_verified else "；另：该家 endpoint 口径待核，拿到 key 后按官方文档填"
+            hint = ("" if self.endpoint_verified else
+                    "; note: this adapter's endpoint shape is unverified — fill it in "
+                    "from the official docs once a key is available")
             raise RuntimeError(
-                f"{self.name}: 缺少环境变量 {self.env_key}{hint}")
+                f"{self.name}: missing environment variable {self.env_key}{hint}")
         return v
 
     def _finish(self, url: str, text: str, t0: float, **kw) -> FetchResponse:
-        """成品收口：算 len_norm、套自家上限、空文本归 page 故障。"""
+        """Final shaping: compute len_norm, apply our own size cap, attribute empty text to
+    the page."""
         ms = (time.time() - t0) * 1000
         meta = kw.pop("raw_meta", {})
         if not (text or "").strip():
@@ -154,7 +169,8 @@ class FetchProvider(ABC):
                                  raw_meta=meta, **kw)
         reason = fault = None
         if len(text) > MAX_TEXT_CHARS:
-            # 留住已取到的部分。丢掉等于把我们的上限伪装成"这家取不到"。
+            # Keep what was retrieved. Discarding it would disguise our own cap as the
+            # provider failing to retrieve anything.
             text = text[:MAX_TEXT_CHARS]
             reason, fault = "our_size_cap", "harness"
             meta = {**meta, "truncated": True}
@@ -177,11 +193,12 @@ class FetchProvider(ABC):
 
 
 class _HttpFetcher(FetchProvider):
-    """走 HTTP 的家共用的壳。子类只需给 endpoint / _headers / _body / _pluck。"""
+    """Shared shell for HTTP providers. A subclass supplies endpoint / _headers /
+    _body / _pluck and nothing else."""
     endpoint: str = ""
-    output_form: str = "text"        # text | html —— html 的会被归一化，报告里要声明
-    auth_basic: bool = False         # True 表示 key 走 HTTP Basic 而不是 header
-    jsonl_body: bool = False         # True 表示响应是 JSONL（每行一个对象）而不是 JSON
+    output_form: str = "text"        # text | html — html is normalised, and declared
+    auth_basic: bool = False         # key travels as HTTP Basic rather than a header
+    jsonl_body: bool = False         # response is JSONL (one object per line), not JSON
 
     def _headers(self, key: str) -> dict:
         raise NotImplementedError
@@ -193,11 +210,13 @@ class _HttpFetcher(FetchProvider):
         raise NotImplementedError
 
     def fetch(self, url: str, timeout: int = DEFAULT_TIMEOUT) -> FetchResponse:
-        key = self._key()                       # 缺 key 在这里抛，不吞
+        key = self._key()                       # a missing key raises here, never swallowed
         if not self.endpoint:
-            raise RuntimeError(f"{self.name}: endpoint 口径待核，按官方文档填 endpoint/_body/_pluck")
-        # 请求体在 try 之外构造：配置错误（缺 zone 之类）该硬失败，
-        # 落进 try 会被当成传输故障记成一行 error，把配置问题伪装成"这家抓不到"。
+            raise RuntimeError(f"{self.name}: endpoint shape unverified — fill in "
+                               "endpoint/_body/_pluck from the official docs")
+        # The request body is built outside the try: a configuration error should fail
+        # hard. Inside, it would be caught as a transport fault and recorded as one more
+        # error row, disguising our misconfiguration as the provider failing.
         headers, body = self._headers(key), self._body(url, timeout)
         t0 = time.time()
         try:
@@ -214,21 +233,22 @@ class _HttpFetcher(FetchProvider):
                               fault=fault, http_status=r.status_code)
         try:
             if self.jsonl_body:
-                # JSONL：每行一个对象。整体 json.loads 会直接抛，而那会被记成
-                # "normalizer_crashed"，把接口形态问题伪装成我们的解析器崩了。
+                # JSONL: one object per line. A whole-body json.loads raises, which gets
+                # recorded as "normalizer_crashed" and disguises a response-shape
+                # question as our parser breaking.
                 rows = [json.loads(l) for l in (r.text or "").split("\n") if l.strip()]
                 data = rows[0] if rows else {}
             else:
                 data = r.json()
         except Exception as e:                  # noqa: BLE001
-            return self._fail(url, t0, error=f"响应不是 JSON: {e}",
+            return self._fail(url, t0, error=f"response is not JSON: {e}",
                               reason="normalizer_crashed", fault="harness",
                               http_status=r.status_code)
         try:
             text = self._pluck(data) or ""
         except Exception as e:                  # noqa: BLE001
-            # 字段映射错了要喊出来，不能伪装成"这家取不到"
-            return self._fail(url, t0, error=f"字段映射失败: {type(e).__name__}: {e}",
+            # A field-mapping error must be visible, not disguised as a failed fetch
+            return self._fail(url, t0, error=f"field mapping failed: {type(e).__name__}: {e}",
                               reason="normalizer_crashed", fault="harness",
                               http_status=r.status_code)
         meta = {}
@@ -238,7 +258,7 @@ class _HttpFetcher(FetchProvider):
         return self._finish(url, text, t0, http_status=r.status_code, raw_meta=meta)
 
 
-# ── 口径已核实的家 ─────────────────────────────────────────────────────────
+# ── Adapters whose request/response shape has been verified ───────────────
 
 class OctenFetcher(_HttpFetcher):
     name = "octen"
@@ -250,8 +270,9 @@ class OctenFetcher(_HttpFetcher):
         return {"X-Api-Key": key, "Content-Type": "application/json"}
 
     def _body(self, url, timeout):
-        # 默认 86400。skill 文档写下限是 300，但 2026-09-01 实测 API 接受 0 且更慢
-        # （3.6s vs 2.5s），说明 0 确实绕开了缓存 —— 用 0，别留 5 分钟的窗口。
+        # The API defaults to a day-long cache window. Zero is accepted and measurably
+        # slower than a cached call, which confirms it really bypasses the cache. Use
+        # zero rather than leaving a several-minute window open.
         return {"urls": [url], "format": "markdown", "max_age_seconds": 0,
                 "timeout": min(timeout, 60)}
 
@@ -287,9 +308,10 @@ class ExaFetcher(_HttpFetcher):
         return {"x-api-key": key, "Content-Type": "application/json"}
 
     def _body(self, url, timeout):
-        # **livecrawl 必须显式设成 always。** 不传时默认 `fallback` —— 先查自家索引，
-        # 命中就直接返回。2026-09-01 实测 never/fallback 0.7s、always 1.9s，差三倍，
-        # 说明 always 确实去实抓了。不设的话这一列量的是"索引覆盖率"而不是"抓取能力"。
+        # **livecrawl must be set to always.** Left unset it defaults to a fallback mode
+        # that consults the provider's own index first and returns immediately on a hit.
+        # Always is measurably slower, which confirms it genuinely fetches. Without it
+        # this column measures index coverage, not fetch capability.
         return {"urls": [url], "text": True, "livecrawl": "always"}
 
     def _pluck(self, data):
@@ -298,12 +320,13 @@ class ExaFetcher(_HttpFetcher):
 
 
 class BrightDataFetcher(_HttpFetcher):
-    """走 **Datasets v3 scrape**（`dataset_id` 那个口），不是 Web Unlocker 的 `/request`。
+    """Uses the **Datasets v3 scrape** endpoint (the `dataset_id` one), not the Web
+    Unlocker `/request` endpoint.
 
-    两者是不同产品：`/request` 需要账户下有 unlocker 型 zone；只有 res_static /
-    serp 型 zone 时那条路走不通，得走 Datasets v3。
-    Datasets v3 是同步的（实测 4.1s），返回 **JSONL**，字段有 markdown / html2text /
-    page_html —— 取 `markdown`，形态与别家一致。
+    They are different products: `/request` needs an unlocker-type zone on the account,
+    and an account with only residential-static or SERP zones cannot use it. Datasets v3
+    is synchronous and returns **JSONL** with markdown / html2text / page_html fields;
+    we take `markdown` so the shape matches the other providers.
     """
     name = "brightdata"
     env_key = "BRIGHTDATA_API_KEY"
@@ -324,21 +347,22 @@ class BrightDataFetcher(_HttpFetcher):
     def fetch(self, url, timeout=DEFAULT_TIMEOUT):
         ds = os.environ.get("BRIGHTDATA_SCRAPE_DATASET", "").strip()
         if not ds:
-            # 不给假默认值：猜一个 dataset_id 换来的是一整列 400，看起来像"这家抓不到"
-            raise RuntimeError("brightdata: 需要 BRIGHTDATA_SCRAPE_DATASET（Datasets v3 的 dataset_id）")
+            # No fake default: a guessed dataset_id buys a whole column of 400s that
+            # looks like the provider failing to fetch
+            raise RuntimeError("brightdata: BRIGHTDATA_SCRAPE_DATASET is required "
+                               "(the Datasets v3 dataset_id)")
         self.endpoint = type(self).endpoint % ds
         return super().fetch(url, timeout)
 
 
 class TavilyFetcher(_HttpFetcher):
-    """不在参考报告的 13 家里，但我们有 key 且它确有 /extract 口 —— 作为可选第 14 家。"""
+    """An optional extra provider: it exposes an /extract endpoint of its own."""
     name = "tavily"
     env_key = "TAVILY_API_KEY"
     endpoint = "https://api.tavily.com/extract"
-    # 官方文档的 /extract 参数表（urls / query / chunks_per_source / extract_depth /
-    # include_images / include_favicon / format / timeout / include_usage）里**没有**
-    # 缓存控制项。注意它不校验未知参数 —— 猜一个名字塞进去它会静默忽略，
-    # 而我们会以为缓存关掉了。所以只能如实标"没有这个旋钮"。
+    # The documented /extract parameters contain **no** cache-control option. Note that
+    # unknown parameters are silently ignored rather than rejected, so guessing a name
+    # would leave us believing the cache was off. Report it honestly as no_knob.
     cache_pinned = "no_knob"
 
     def _headers(self, key):
@@ -352,7 +376,7 @@ class TavilyFetcher(_HttpFetcher):
         return (res[0].get("raw_content") or "") if res else ""
 
 
-# ── 本地库（无需 key）───────────────────────────────────────────────────────
+# ── Local libraries (no key required) ─────────────────────────────────────
 
 def _import_trafilatura():
     try:
@@ -378,12 +402,13 @@ _ANY_TAG = re.compile(r"<[^>]+>")
 
 
 def html_to_text(html: str) -> str:
-    """把 HTML 归一化成文本。
+    """Normalise HTML into text.
 
-    有的家（zyte 的 browserHtml、you 的 contents）返回的就是 HTML，而别家返回
-    markdown/文本。**本轮只评抓取能力**，HTML->文本是解析步骤、不在评价范围 ——
-    不归一化的话它们会被判定器当成"返回了原始载荷"全判 lost，那量到的是输出格式
-    不是抓取能力。做了这一步要在报告里声明（`output_form` 字段）。
+    Some providers return HTML while others return markdown or plain text. Since only
+    fetch capability is scored, HTML-to-text is a parsing step and out of scope. Without
+    this normalisation those providers would be judged as having returned a raw payload
+    and marked lost across the board, which measures output format rather than fetch
+    capability. The step is declared in the report via the `output_form` field.
     """
     if not html:
         return ""
@@ -401,8 +426,10 @@ class TrafilaturaFetcher(FetchProvider):
         t0 = time.time()
         mod = _import_trafilatura()
         if mod is None:
-            # 依赖缺失是我们的锅，不是它抓不到 —— 故障不是 0 分（playbook 5.4）
-            return self._fail(url, t0, error="trafilatura 未安装（requirements-fetch.txt）",
+            # A missing dependency is our fault, not a failure to fetch — a fault is
+            # reported, never scored as zero
+            return self._fail(url, t0,
+                              error="trafilatura is not installed (requirements-fetch.txt)",
                               reason="normalizer_crashed", fault="harness")
         try:
             raw = mod.fetch_url(url)
@@ -422,7 +449,8 @@ class ReadabilityFetcher(FetchProvider):
         t0 = time.time()
         mods = _import_readability()
         if mods is None:
-            return self._fail(url, t0, error="readability-lxml / html2text 未安装",
+            return self._fail(url, t0,
+                              error="readability-lxml / html2text are not installed",
                               reason="normalizer_crashed", fault="harness")
         Document, html2text = mods
         try:
@@ -443,18 +471,20 @@ class ReadabilityFetcher(FetchProvider):
         return self._finish(url, text or "", t0)
 
 
-# ── endpoint 口径待核的 7 家：骨架 + 缺 key 硬失败 ───────────────────────────
+# ── Providers with an unverified endpoint shape: skeleton only, hard-fail on key ──
 
-# ── 2026-09-01 新接线的四家（endpoint 与参数均**行为验证过**，不是按印象填）──────
+# ── Adapters whose endpoint and parameters were **verified by observed behaviour**,
+#    not filled in from memory ───────────────────────────────────────────────
 
 class ZyteFetcher(_HttpFetcher):
-    """`browserHtml` = 每次真开一个浏览器渲染，所以本来就没有缓存概念。
-    另两个模式：`httpResponseBody`（base64 原始响应，不跑 JS）、`article`（它自己的
-    结构化抽取，对非文章页几乎为空）。抓取能力口径下 browserHtml 才是可比的那个。"""
+    """`browserHtml` renders in a real browser on every call, so there is no cache to
+    bypass. The alternatives are a raw base64 response with no JavaScript, and the
+    provider's own structured article extraction, which is nearly empty on non-article
+    pages. Under a fetch-capability metric, browserHtml is the comparable one."""
     name = "zyte"
     env_key = "ZYTE_API_KEY"
     endpoint = "https://api.zyte.com/v1/extract"
-    auth_basic = True                # key 作用户名、密码留空
+    auth_basic = True                # key as the username, empty password
     output_form = "html"
     cache_pinned = "no_knob"
 
@@ -469,12 +499,13 @@ class ZyteFetcher(_HttpFetcher):
 
 
 class YouFetcher(_HttpFetcher):
-    """字段是 `urls`（复数数组）—— 422 的校验错误直接把 schema 说出来了。返回 HTML。"""
+    """The field is `urls` (a plural array); the API's own validation error states the
+    schema. Returns HTML."""
     name = "you"
     env_key = "YOU_API_KEY"
     endpoint = "https://api.you.com/v1/contents"
     output_form = "html"
-    cache_pinned = "unknown"         # 没查到新鲜度参数，如实标查不到
+    cache_pinned = "unknown"         # no freshness parameter found; reported honestly
 
     def _headers(self, key):
         return {"X-API-Key": key, "Content-Type": "application/json"}
@@ -488,8 +519,9 @@ class YouFetcher(_HttpFetcher):
 
 
 class LinkupFetcher(_HttpFetcher):
-    """`/v1/fetch` 直接返回干净 markdown。**它不校验未知参数**（塞 `__bogus__` 照样 200），
-    所以缓存开关不能靠试名字 —— 猜错会被静默忽略而我们以为钉住了。"""
+    """`/v1/fetch` returns clean markdown directly. **It does not validate unknown
+    parameters** — a nonsense field still returns 200 — so a cache knob cannot be found
+    by guessing names: a wrong guess is ignored while we believe it took effect."""
     name = "linkup"
     env_key = "LINKUP_API_KEY"
     endpoint = "https://api.linkup.so/v1/fetch"
@@ -506,15 +538,15 @@ class LinkupFetcher(_HttpFetcher):
 
 
 class ParallelFetcher(_HttpFetcher):
-    """用 `v1beta/extract` + `full_content: True`，**不用 `v1/extract` 的 objective 模式**。
+    """Uses `v1beta/extract` with `full_content`, **not the objective mode of
+    `v1/extract`**.
 
-    2026-09-01 在同一个 URL 上实测：
-      v1  + objective        excerpts 1639 字符（按问题收窄）
-      v1  裸                 excerpts 3521 字符
-      v1beta + full_content  full_content 3521 字符（全文）
-    `objective` 是查询驱动的抽取 —— 抓取能力评测要的是**整页**，不是按某个问题收窄的
-    片段，那会把"抓到了多少"混成"回答得准不准"。`v1` 不接受 `full_content` 参数
-    （extra_forbidden），所以全文只能走 v1beta。"""
+    On the same URL, the objective mode returns excerpts narrowed to the stated question,
+    while full_content returns the whole page. `objective` is query-driven extraction,
+    and a fetch-capability evaluation needs the **whole page**: scoring a
+    question-narrowed excerpt conflates "how much was retrieved" with "how well it
+    answered". The v1 endpoint rejects `full_content` outright, so full text requires
+    v1beta."""
     name = "parallel"
     env_key = "PARALLEL_API_KEY"
     endpoint = "https://api.parallel.ai/v1beta/extract"
@@ -536,10 +568,11 @@ class ParallelFetcher(_HttpFetcher):
 
 
 class _UnverifiedFetcher(_HttpFetcher):
-    # 拿到 key 接线时，**顺手把各家的实时抓开关一并查清并设上** —— 不设的话
-    # 那一列量的是索引覆盖率而不是抓取能力（exa 就栽在这儿）。
-    """拿到 key 之后，按官方文档填 endpoint / _headers / _body / _pluck 四处即可。
-    在此之前不编 endpoint —— 编错跑出来的是一整列假失败。"""
+    # When wiring one of these up, **find and set its live-fetch knob at the same time**.
+    # Left unset, the column measures index coverage rather than fetch capability.
+    """Once a key is available, fill in endpoint / _headers / _body / _pluck from the
+    official docs. Until then the endpoint stays unset: a wrong guess produces a whole
+    column of fake failures."""
     endpoint = ""
     endpoint_verified = False
     cache_pinned = "unpinned"
@@ -551,7 +584,7 @@ class _UnverifiedFetcher(_HttpFetcher):
         return {"url": url}
 
     def _pluck(self, data):
-        raise NotImplementedError(f"{self.name}: 取文本路径待核")
+        raise NotImplementedError(f"{self.name}: response text path unverified")
 
 
 
@@ -582,27 +615,30 @@ FETCHERS: dict[str, type[FetchProvider]] = {
     )
 }
 
-# 参考报告的 13 家（tavily 不在其中，是我们额外的可选一家）
+# The full provider roster this lane knows about
 ROSTER_13 = ("firecrawl", "context", "octen", "parallel", "exa", "you", "linkup",
              "zyte", "cloudflare", "brightdata", "readability", "apify", "trafilatura")
 
-# 今天能跑的家：有 key、且 endpoint 与实时抓参数都**行为验证过**。
-# 接新家时顺手把它的「实时抓、不走缓存」开关一并查清设上 —— 不设的话那一列量的是
-# 索引覆盖率而不是抓取能力（exa 的 livecrawl 就栽过这一条）。
+# Providers that can run now: a key is present and both the endpoint and the live-fetch
+# parameter were verified by observed behaviour. When adding one, find and set its
+# live-fetch knob at the same time — unset, the column measures index coverage rather
+# than fetch capability.
 RUNNABLE_TODAY = ("octen", "exa", "tavily", "trafilatura", "readability",
                   "zyte", "you", "linkup", "parallel", "firecrawl", "brightdata")
 
 
 
 def env_divergence(providers=None) -> dict[str, tuple[str, str]]:
-    """`.env` 与 shell 环境不一致的凭据。返回 {变量名: (env里的, shell里的)}（已掩码）。
+    """Credentials that differ between `.env` and the shell environment. Returns
+    {variable: (value in .env, value in the shell)}, masked.
 
-    **`_load_dotenv` 用的是 `os.environ.setdefault`，不覆盖已存在的变量。** 于是 shell 里
-    残留的旧 key 会静默压过 `.env` 里的新 key，而两边看起来都"设好了"。
-    实测踩到过：新 key 写进了 .env，跑出来却一直是鉴权/额度类错误 —— 因为 shell 里
-    有个旧 key 一直在生效，新 key 一次都没被用过。两边看起来都"设好了"，最难查。
+    **`_load_dotenv` uses `os.environ.setdefault` and does not override variables that
+    already exist.** A stale key left in the shell therefore wins silently over the new
+    one in `.env` while both look correctly configured. The symptom is an entire round
+    failing on authorisation against a key that was never actually used.
 
-    凭据不进日志：只回掩码后的前后几位，够人辨认是哪一把即可（playbook §9.7）。
+    Secrets never reach the log: only a masked prefix and suffix are returned, enough for
+    a person to recognise which key is which.
     """
     from pathlib import Path
     path = Path(__file__).parent.parent / ".env"
@@ -623,7 +659,7 @@ def env_divergence(providers=None) -> dict[str, tuple[str, str]]:
             continue
         shell = os.environ.get(k)
         if shell is not None and shell != v:
-            m = lambda x: (x[:6] + "…" + x[-4:]) if x and len(x) > 12 else "(短)"
+            m = lambda x: (x[:6] + "…" + x[-4:]) if x and len(x) > 12 else "(short)"
             out[k] = (m(v), m(shell))
     return out
 
@@ -632,6 +668,6 @@ def get_fetcher(name: str) -> FetchProvider:
     return FETCHERS[name]()
 
 
-assert set(ROSTER_13) <= set(FETCHERS), "roster 里有名字没有对应 adapter"
+assert set(ROSTER_13) <= set(FETCHERS), "a roster name has no corresponding adapter"
 assert len(ROSTER_13) == 13
 assert set(RUNNABLE_TODAY) <= set(FETCHERS)

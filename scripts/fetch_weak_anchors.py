@@ -1,15 +1,20 @@
-"""给 GT 缺口页补**弱锚点**：从中立 SERP 取这条 URL 的 title + snippet。
+"""Add **weak anchors** to ground-truth gap pages: the title and snippet for that URL
+from a neutral SERP.
 
-18 个页面我们自己的浏览器也被拦了，建不出参考词表，于是那些格只能交面板"裸判"——
-而裸判系统性偏松。弱锚点补不回"内容全不全"，但足以激活**同一性**这条硬否决，
-而"返回了首页 / 别的页"恰恰是裸判最容易放过的一类。
+On pages where our own browser is blocked, no reference vocabulary can be built, and
+those cells fall back to the panel judging with no reference at all — which is
+systematically lenient. Weak anchors cannot restore "how complete is the content", but
+they are enough to arm the **identity** veto, and "returned the home page instead" is
+exactly the failure an unreferenced panel most often waves through.
 
-**为什么可以用 SERP**：google/bing 是评测体系里的中立第三方，不在被测名单上
-（`src/serp.py` 的既有定位）。**绝不能用**某家 provider 的 unlocker 去建参考 ——
-那是让参赛选手出考题，而 brightdata 本身就是候选厂商之一。
+**Why a SERP is acceptable here**: a general search engine is a neutral third party in
+this evaluation and is not among the systems under test. **Never** build a reference with
+some provider's own unblocking product — that hands the exam to a contestant, and such a
+provider may itself be on the roster.
 
-锚点只取 **title**（几乎必然出现在页面里，最稳）+ snippet 里的实词，并记
-`anchor_source: "serp"`，报告要能说清有多少判定是靠弱锚点做出来的。
+Anchors take the **title** (almost certain to appear in the page, so the most reliable
+signal) plus content words from the snippet, and record `anchor_source: "serp"` so the
+report can state how many verdicts rested on weak anchors.
 """
 from __future__ import annotations
 
@@ -30,13 +35,14 @@ def _norm(u: str) -> str:
 
 
 def serp_anchors(url: str, k: int = 8) -> dict:
-    """查这条 URL 在 SERP 上的 title + snippet。命中判据是**归一化后的 URL 相等**，
-    不是包含 —— 包含会把同域的别的页当成它自己。"""
+    """Look up this URL's title and snippet on a SERP. A hit requires the **normalised
+    URLs to be equal**, not one containing the other: containment would accept a
+    different page on the same domain as this one."""
     target = _norm(url)
     parsed = urlparse(url)
     host = parsed.netloc
-    # 路径转成词：site:bestbuy.com apple macbook air 13 inch
-    # 直接把带斜杠和连字符的原始路径当查询词，Google 基本查不到。
+    # Turn the path into words. Feeding the raw path, with its slashes and hyphens,
+    # straight in as a query finds almost nothing.
     slug = re.sub(r"[^a-z0-9]+", " ", parsed.path.lower()).strip()
     slug = " ".join(w for w in slug.split() if len(w) > 1)[:80]
     hits = []
@@ -59,13 +65,14 @@ def serp_anchors(url: str, k: int = 8) -> dict:
     snip_terms = [t for t in G._content_terms(it.snippet, set(title_terms), 6)]
     return {"anchor_source": "serp", "serp_title": it.title,
             "serp_snippet": it.snippet[:300],
-            # 标题词最稳（几乎必然出现在页面里），snippet 补两个
+            # Title words are the most reliable; the snippet contributes a couple more
             "anchors": (title_terms + snip_terms[:2])[:6]}
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pageset", required=True, help="带 gt 的页面集，原地回写")
+    ap.add_argument("--pageset", required=True,
+                    help="page set carrying ground truth; rewritten in place")
     ap.add_argument("--limit", type=int)
     a = ap.parse_args()
     path = Path(a.pageset)
@@ -73,7 +80,7 @@ def main() -> None:
     gaps = [r for r in rows if (r.get("gt") or {}).get("gt_gap")]
     if a.limit:
         gaps = gaps[:a.limit]
-    print("GT 缺口页 %d 条，逐条查中立 SERP" % len(gaps))
+    print("%d ground-truth gap pages; querying a neutral SERP for each" % len(gaps))
 
     got = 0
     for i, r in enumerate(gaps, 1):
@@ -93,7 +100,8 @@ def main() -> None:
     with path.open("w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    print("\n拿到弱锚点 %d / %d 条（其余仍只能裸判）" % (got, len(gaps)))
+    print("\nweak anchors obtained for %d / %d (the rest still judge without a reference)"
+          % (got, len(gaps)))
 
 
 if __name__ == "__main__":

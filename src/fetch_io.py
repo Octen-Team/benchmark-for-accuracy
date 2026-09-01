@@ -1,7 +1,9 @@
-"""fetch 评测线的落盘与进度：两个小工具，刻意不依赖别的模块。
+"""Durable append and progress reporting for the fetch lane. Two small helpers, kept
+free of any other dependency on purpose.
 
-`append` 单条 flush + fsync 落盘 —— 判定是这条流水线里最贵的一步，进程中途被杀时
-已判完的格子不能跟着重来。加锁是因为多线程共写一个文件。
+`append` flushes and fsyncs every row. Judging is the most expensive step in this
+pipeline, and cells already judged must not have to be redone because the process was
+killed midway. The lock is there because several threads write the same file.
 """
 from __future__ import annotations
 
@@ -24,12 +26,13 @@ def append(path: Path, rec: dict) -> None:
 
 
 def progress(done: int, total: int, t0: float, *, every: int = 10) -> str | None:
-    """进度行。返回 None 表示这次不该打印：`if (s := progress(...)): print(s)`。
+    """A progress line, or None when this call should not print:
+    `if (s := progress(...)): print(s)`.
 
-    长跑必须能观察到进度，否则真正的错误会被挤出视野。
+    A long run has to be observable, or a real error scrolls past unseen.
     """
     if done % every and done != total:
         return None
     el = time.time() - t0
     eta = el / max(1, done) * (total - done)
-    return f"  {done}/{total}  已用 {el/60:.1f} 分  预计还需 {eta/60:.1f} 分"
+    return "  %d/%d  %.1f min elapsed  %.1f min remaining" % (done, total, el / 60, eta / 60)

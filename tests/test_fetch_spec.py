@@ -1,4 +1,8 @@
-"""fetch_spec 的配比与阈值断言。每条断言都要能拦住对应的错（playbook §8）。"""
+"""Distribution and threshold assertions for fetch_spec.
+
+Each assertion here exists to catch one specific way the config can drift; a test that
+never fails when the thing it guards breaks is worse than no test.
+"""
 import pytest
 
 from src import fetch_spec as S
@@ -37,7 +41,8 @@ def test_antibot_subclasses_are_the_three_declared():
 
 
 def test_thresholds_are_the_fetch_capability_numbers():
-    """本轮只评抓取能力：阈值只回答"拿到的是不是这一页的实质内容"。"""
+    """Fetch capability only: the thresholds answer whether this is the substantive
+    content of this page, nothing about how cleanly it was parsed."""
     assert S.TH["fetch_ok"] == 0.3
     assert S.TH["fetch_lost"] == 0.05
     assert S.TH["render_ok"] == 0.4
@@ -46,16 +51,18 @@ def test_thresholds_are_the_fetch_capability_numbers():
 
 
 def test_parsing_quality_thresholds_are_gone():
-    """正文纯度/结构保真/截断完整度已从评价里删除 —— 阈值也不该留着。"""
+    """Text purity / structural fidelity / truncation completeness were removed from
+    the scope, so their thresholds must not linger."""
     for dead in ("noise_pass", "structure_pass", "tail_pass", "coverage_pass"):
-        assert dead not in S.TH, "%s 还在，报告读者会以为它进了评价" % dead
+        assert dead not in S.TH, "%s survives; a reader would assume it is scored" % dead
 
 
 def test_removed_enums_stay_removed():
-    """截图形态判定从没接线过（gt.shape 永远是空的），范围收窄后已整簇删除 ——
-    留着一个没人产出的枚举，读代码的人会以为判定看了它。"""
+    """Screenshot shape labelling was never wired up (gt.shape was always empty) and
+    was removed with the rest of the narrowing. Leaving an enum nothing produces makes
+    a reader believe the judge consults it."""
     assert not hasattr(S, "SHAPES")
-    # 语种轴不在报告的六个维度里，整条删掉（含 LANG_PAGES / RTL_LANGS）
+    # The language axis is not one of the reported dimensions; removed entirely.
     assert not hasattr(S, "LANG_PAGES")
     assert not hasattr(S, "RTL_LANGS")
 
@@ -72,7 +79,7 @@ def test_assert_pageset_accepts_a_valid_set():
 
 
 def test_assert_pageset_rejects_wrong_type_counts():
-    with pytest.raises(AssertionError, match="type 计数"):
+    with pytest.raises(AssertionError, match="type counts do not match"):
         S.assert_pageset([{"pid": "x", "type": "baseline", "probes": [],
                            "expect": "content", "defended": False}] * 100)
 
@@ -80,19 +87,19 @@ def test_assert_pageset_rejects_wrong_type_counts():
 def test_assert_pageset_rejects_unknown_probe():
     rows = _valid_rows()
     rows[0]["probes"] = ["no_such_probe"]
-    with pytest.raises(AssertionError, match="未知 probe"):
+    with pytest.raises(AssertionError, match="unknown probe"):
         S.assert_pageset(rows)
 
 
 def test_assert_pageset_rejects_unknown_expect():
     rows = _valid_rows()
     rows[0]["expect"] = "maybe"
-    with pytest.raises(AssertionError, match="未知 expect"):
+    with pytest.raises(AssertionError, match="unknown expect"):
         S.assert_pageset(rows)
 
 
 def test_assert_pageset_rejects_wrong_defended_count():
     rows = _valid_rows()
     rows[0]["defended"] = not rows[0]["defended"]
-    with pytest.raises(AssertionError, match="防守子集"):
+    with pytest.raises(AssertionError, match="defended subset"):
         S.assert_pageset(rows)

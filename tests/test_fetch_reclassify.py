@@ -1,4 +1,5 @@
-"""离线重分类：分类规则改了之后，就地更新已有结果，不用重抓。"""
+"""Offline reclassification: update existing results in place after a rule change,
+without re-fetching."""
 import json
 import subprocess
 import sys
@@ -10,8 +11,9 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 def test_a_site_ban_in_the_body_beats_the_status_code():
-    """Zyte 用 HTTP 520 + `"title":"Website Ban"` 表达"被站点封了"。
-    落进 other 会让「被拦」看起来像「不明错误」，归因表上含义完全不同。"""
+    """Some providers express "the site banned us" as HTTP 520 with a ban title in the
+    body. Left in `other`, a genuine block reads as an unexplained error, and those
+    mean different things in the attribution table."""
     rec = {"status": "error", "http_status": 520, "failure_reason": "other",
            "error": '{"type":"/download/website-ban","title":"Website Ban","status":520}'}
     assert reclassify(rec) is True
@@ -39,7 +41,7 @@ def test_a_real_403_is_left_alone():
 
 
 def test_rows_without_an_explicit_reason_are_untouched():
-    """只在响应体**明说了原因**时才改；没说的一律保留按状态码的判断。"""
+    """Only rewrite when the body **states** a reason; otherwise keep the status-code call."""
     rec = {"status": "error", "http_status": 429, "failure_reason": "rate_limited",
            "error": "Too many requests, slow down"}
     assert reclassify(rec) is False
@@ -47,7 +49,8 @@ def test_rows_without_an_explicit_reason_are_untouched():
 
 
 def test_an_explicit_reason_wins_over_the_status_code():
-    """429 但响应体说的是政策拒绝 —— 以响应体为准，状态码只是兜底。"""
+    """A 429 whose body describes a policy refusal: the body wins, the status code is
+    only a fallback."""
     rec = {"status": "error", "http_status": 429, "failure_reason": "rate_limited",
            "error": "we do not support this site"}
     assert reclassify(rec) is True
@@ -55,7 +58,8 @@ def test_an_explicit_reason_wins_over_the_status_code():
 
 
 def test_the_verdict_reason_string_is_updated_too():
-    """判定记录里 reason 嵌着 failure_reason —— 不同步改的话两个字段会对不上。"""
+    """Verdict rows embed failure_reason inside `reason`; without updating both, the two
+    fields disagree."""
     rec = {"status": "error", "http_status": 403, "failure_reason": "anti_bot_blocked",
            "error": "we do not support this site",
            "reason": "fetch_failed:anti_bot_blocked"}
@@ -78,8 +82,9 @@ def test_script_patches_a_file_in_place(tmp_path):
 
 
 def test_verdicts_sync_attribution_from_extractions(tmp_path):
-    """判定记录里没有 http_status / error，自己重分类分不出来 —— 只能从抓取结果搬。
-    不同步的话报告读的还是旧归因，重分类等于白做。"""
+    """Verdict rows carry no http_status or error, so they cannot be reclassified on
+    their own — the values have to come from the extraction rows. Out of sync, the
+    report still shows the old attribution and the reclassification did nothing."""
     ext = tmp_path / "e.jsonl"
     ext.write_text(json.dumps({"pid": "p1", "provider": "firecrawl", "run_seq": 0,
                                "failure_reason": "blocklisted_domain",

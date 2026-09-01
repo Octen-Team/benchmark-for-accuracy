@@ -1,7 +1,10 @@
-"""离线重分类失败原因 —— 错误原文都存着，不用重抓。
+"""Reclassify failure reasons offline. The original error text is stored, so nothing
+needs re-fetching.
 
-用途：分类规则改了（比如 403 拆成"政策拒绝"与"真被拦"）之后，把已有的抓取结果和
-判定结果就地更新。**判定档位不受影响**（传输失败一律 lost），变的只是归因那一列。
+Use this after a rule change — for example splitting 403 into "refused by policy" and
+"genuinely blocked" — to update existing fetch and verdict files in place. **Verdict
+bands are unaffected** (a transport failure is lost either way); only the attribution
+column changes.
 """
 from __future__ import annotations
 
@@ -29,11 +32,12 @@ def reclassify(rec: dict) -> bool:
 
 
 def sync_from(extractions: Path, rows: list[dict]) -> int:
-    """把归因从抓取结果同步到判定结果。
+    """Copy the attribution from the fetch rows across to the verdict rows.
 
-    **判定记录里没有 `http_status` / `error`**，自己重新分类是分不出来的 ——
-    只能按 (pid, provider) 从抓取结果那边搬过来。不同步的话两个文件会对不上，
-    而报告读的是判定文件，等于重分类白做。
+    **Verdict rows carry no `http_status` or `error`**, so they cannot be reclassified on
+    their own; the values have to be carried over by (pid, provider). Without this the
+    two files disagree, and since the report reads the verdict file, the
+    reclassification would have no effect.
     """
     src = {}
     for line in extractions.read_text(encoding="utf-8").split("\n"):
@@ -59,7 +63,8 @@ def sync_from(extractions: Path, rows: list[dict]) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="+", help="extractions.jsonl / verdicts.jsonl")
-    ap.add_argument("--sync-from", help="判定文件从这份抓取结果同步归因")
+    ap.add_argument("--sync-from",
+                    help="fetch results to copy attributions from into the verdict file")
     a = ap.parse_args()
     for f in a.files:
         p = Path(f)
@@ -71,7 +76,7 @@ def main() -> None:
             for r in rows:
                 fh.write(json.dumps(r, ensure_ascii=False) + "\n")
         after = Counter(r.get("failure_reason") for r in rows if r.get("failure_reason"))
-        print("%s: 改了 %d 条" % (p, n))
+        print("%s: updated %d rows" % (p, n))
         for k, v in after.most_common(5):
             print("    %-22s %d" % (k, v))
 

@@ -1,17 +1,21 @@
-# fetch 评测线的可选依赖。核心 requirements.txt 仍只有 requests。
-# 缺任何一项时对应功能记"不可用"并如实上报，不让主流程崩（playbook §5.4）。
+# Optional dependencies for the fetch evaluation lane. The core requirements.txt still
+# holds nothing but requests.
+#
+# When any of these is missing, the corresponding feature is recorded as unavailable and
+# reported as such. A missing dependency never crashes a run, and never counts as a
+# provider failure.
 
-# 本地解析库（同时是参赛的两家 provider）
+# Local extraction libraries (these double as two of the providers under test)
 trafilatura>=1.8
 readability-lxml>=0.8
 html2text>=2024.2.26
 
-# GT 解析通道：非 HTML 文档
+# Ground-truth parse channel: non-HTML documents
 pypdf>=4.0
 python-docx>=1.1
 openpyxl>=3.1
 python-pptx>=0.6
 feedparser>=6.0
 
-# GT 浏览器通道（另需 `python -m playwright install chromium`）
+# Ground-truth browser channel (also run: python -m playwright install chromium)
 playwright>=1.40

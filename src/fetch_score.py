@@ -1,15 +1,19 @@
-"""抓取成败判定 + 三模型面板。
+"""Fetch-success judging: a mechanical layer plus a three-model panel.
 
-**本轮只评抓取能力。** 主口径只回答一个问题：**这一页抓到了没有。**
-不评正文纯度、不评结构保真、不评截断完整度 —— 那三项是解析质量，已从代码里删除
-（留着不评的指标躺在报告里，读的人会以为它们进了评价）。
+**Fetch capability only.** The headline metric answers exactly one question: was this
+page retrieved. Text purity, structural fidelity and truncation completeness are not
+scored — they are parsing quality, and their code was removed rather than left dormant,
+because an unscored metric sitting in the report reads as though it counts.
 
-因为只剩一个单位，跨型可比，**总分成立**；五个 type 从"各有各的主指标"降级成切片轴。
+Because a single unit is left, the score is comparable across page types, so a total is
+meaningful; the five types become slice axes rather than five separate headline metrics.
 
-判定分两层，严格分开（playbook §3.1）：
-  机械层  纯函数算出来的档位。可复现、可核到具体证据。
-  面板层  只处理**非 clean-pass** 的格子。三 family 三模型盲判，多数决，
-          三方分歧保留机械判定。裁决按指纹缓存，重跑不重复烧 token（§3.2）。
+Judging has two strictly separated layers:
+  Mechanical  a band computed by pure functions. Reproducible, traceable to evidence.
+  Panel       handles only the cells the mechanical layer could not settle. Three models
+              from three different families judge blind, majority wins, and a three-way
+              split keeps the mechanical verdict. Rulings are cached by fingerprint so a
+              re-run does not spend tokens twice.
 """
 from __future__ import annotations
 
@@ -21,7 +25,7 @@ from threading import Lock
 from . import fetch_checks as C
 from .fetch_spec import TH
 
-RUBRIC_VERSION = "fetch-v3-20260901"   # v3：只评抓取成败
+RUBRIC_VERSION = "fetch-v3-20260901"   # v3: fetch success only
 PANEL_TEXT_BUDGET = 6000
 
 _PASS, _PARTIAL, _LOST = "pass", "partial", "lost"
@@ -29,23 +33,29 @@ WEIGHT = {_PASS: 1.0, _PARTIAL: 0.5, _LOST: 0.0}
 
 
 def _v(verdict, reason, **kw) -> dict:
-    """`final=True` 表示机械层的判定是终局的，不送面板复判。"""
+    """`final=True` marks a mechanical verdict as terminal: no panel review."""
     return {"verdict": verdict, "reason": reason, "needs_panel": False, "final": False,
             "dishonest": False, "suspicious_bypass": False, **kw}
 
 
-# 缺口页上仍可用的字段：**只有身份类的**。内容词表是被拦时抓到的验证页文案，
-# 拿它当参考会把真的抓到了内容的家判成 lost（w3.org 实测）。
+# On a gap page only the **identity** fields remain usable. The content vocabulary was
+# derived from whatever our own browser received, which on a blocked page is the
+# challenge screen; using that as the reference marks providers that genuinely got the
+# content as lost.
 _WEAK_KEYS = ("anchors", "anchor_source", "serp_title", "serp_snippet", "title")
 
 
 def effective_gt(page: dict) -> dict:
-    """能用于判定的 GT。判定器与面板都必须走这一个口子。
+    """The ground truth that may be used for judging. Both the mechanical layer and the
+    panel must go through this one accessor.
 
-    缺口页分两种：
-      有中立 SERP 的弱锚点  只留身份类字段（`anchors` 等），**不留内容词表** ——
-                            身份能判（"返回的是不是这一页"），完整度判不了。
-      连弱锚点也没有        返回空，只能交给跨家交叉判。
+    Gap pages come in two kinds:
+      Weak anchors from a neutral SERP  keep only identity fields (`anchors` and
+                                        friends), **never the content vocabulary**.
+                                        Identity is still decidable ("is this that
+                                        page?"); completeness is not.
+      No anchors at all                 return empty; only the cross-provider panel can
+                                        judge these.
     """
     gt = page.get("gt") or {}
     if not gt.get("gt_gap"):
@@ -56,7 +66,8 @@ def effective_gt(page: dict) -> dict:
 
 
 def run_checks(page: dict, resp: dict) -> dict:
-    """这一格能算的机械检查。GT 缺的项返回 None（"无定义"），不是 0。"""
+    """The mechanical checks computable for this cell. Anything the ground truth cannot
+    support returns None ("undefined"), never 0."""
     gt = effective_gt(page)
     text = resp.get("text") or ""
     return {
@@ -81,10 +92,13 @@ def _band(value: float | None, ok: float, lost: float) -> str | None:
 
 
 def _verdict_expect_error(page: dict, resp: dict, ch: dict) -> dict:
-    """`expect == "error"` 的页（404 / 503）：**正确行为是干净报错。**
+    """Pages where `expect == "error"` (404 / 503): **the correct behaviour is a clean
+    error.**
 
-    把错误页的页面体当正文返回是错的 —— 下游拿到一段 "Not Found" 当内容用，而且
-    不知道自己拿错了。指标只看成败时，这类"没抓到却声称抓到了"是最该被看见的一档。
+    Returning the error page's body as content is wrong — downstream receives a chunk of
+    "Not Found" and treats it as content, with no way to tell. When the metric only
+    measures success, this "did not get it but claims it did" case is the one that most
+    needs to be visible.
     """
     if resp.get("status") == "error":
         return _v(_PASS, "clean_error", final=True)
@@ -103,7 +117,8 @@ def _verdict_expect_redirect(page: dict, resp: dict, ch: dict) -> dict:
 
 
 def mechanical_verdict(page: dict, resp: dict, ch: dict) -> dict:
-    """抓到了没有。返回 `verdict=None` 表示机械层判不了，交面板。"""
+    """Was the page retrieved? `verdict=None` means the mechanical layer cannot decide
+    and the cell goes to the panel."""
     expect = page.get("expect", "content")
     if expect == "error":
         return _verdict_expect_error(page, resp, ch)
@@ -111,41 +126,47 @@ def mechanical_verdict(page: dict, resp: dict, ch: dict) -> dict:
         return _verdict_expect_redirect(page, resp, ch)
 
     if resp.get("status") == "error":
-        # 传输失败是**终局**：没有文本，面板无从判起，送过去只是烧钱。
+        # A transport failure is terminal: there is no text, so the panel has nothing to
+        # judge and sending it would only spend tokens.
         return _v(_LOST, "fetch_failed:%s" % (resp.get("failure_reason") or "error"),
                   final=True)
 
-    # ── 两条硬否决：在"抓到了没有"这个问题下，它们都等于没抓到 ──────────────
-    # 这两条是**终局**（`final=True`）：证据是机械的、确定的，不送面板复判。
-    # 送了会被推翻 —— 实测 readability 返回 PDF 原始字节（encoding_ok=False），
-    # 面板只看到 6000 字符预览里的 `%PDF-1.4 ... obj ... stream`，判成"内容来了"。
+    # ── Two hard vetoes. Under the question "was the page retrieved", both mean no. ──
+    # These are terminal (`final=True`): the evidence is mechanical and certain, so they
+    # are not sent for panel review. Sending them gets them overturned — a parser that
+    # returns raw PDF bytes fails the encoding check, but the panel sees only a preview
+    # of `%PDF-1.4 ... obj ... stream` and reads it as "content arrived".
     if ch["identity_ok"] is False:
-        # 返回的不是这条 URL 的内容。它在覆盖率口径下能蒙过去，比失败更坏 ——
-        # 下游发现不了。
+        # This is not the content of this URL. It can slip past a coverage gate, which
+        # makes it worse than an outright failure: nothing downstream notices.
         #
-        # **弱锚点（来自 SERP 标题/摘要）判出来的不同一不是终局**：搜索引擎的标题
-        # 可能已经过时，证据强度不足以支撑一个不可申诉的判定，交面板复核。
+        # **A mismatch found via weak anchors (a SERP title/snippet) is not terminal.**
+        # Search-engine titles go stale, so the evidence is not strong enough for a
+        # verdict with no appeal; those go to the panel.
         weak = (page.get("gt") or {}).get("anchor_source") == "serp"
         return _v(_LOST, "wrong_page" + ("_weak" if weak else ""),
                   dishonest=not weak, final=not weak, needs_panel=weak)
     if ch["encoding_ok"] is False:
         return _v(_LOST, "mojibake", final=True)
 
-    # ── 反爬页：三小类"过"的定义不同，机械层给不出，交面板 ──────────────────
+    # ── Anti-bot pages: "passing" differs per sub-class, so the mechanical layer
+    #    cannot decide and the panel takes over. ────────────────────────────────
     if page["type"] == "antibot":
         sus = (page.get("antibot_subclass") == "paywall" and ch["len_norm"] > 1500)
         return _v(None, "needs_wall_judgement", needs_panel=True, suspicious_bypass=sus)
 
-    # ── SPA：拿到服务端骨架不算抓到这一页 ────────────────────────────────
+    # ── SPA: retrieving the server-side shell is not retrieving the page. ──────
     if page["type"] == "render":
         if ch["render_hit"] is None:
-            # 没有渲染锚点就分不出"骨架"和"内容" —— coverage 会把壳判成 pass，
-            # 所以这里必须交面板，不能退回通用闸门。
+            # Without render anchors there is no way to separate shell from content:
+            # coverage would pass the shell. The panel must decide; falling back to the
+            # generic gate would be wrong.
             return _v(None, "no_render_anchors", needs_panel=True)
         return _v(_band(ch["render_hit"], TH["render_ok"], TH["fetch_lost"]),
                   "render_anchors")
 
-    # ── 其余：coverage 作成功闸门（低阈值，只区分"真内容 / 空壳"）──────────
+    # ── Everything else: coverage as the success gate. The threshold is deliberately
+    #    low; it only separates real content from an empty shell. ─────────────
     if ch["degenerate"] or ch["coverage"] is None:
         return _v(None, "no_mechanical_basis", needs_panel=True)
     out = _v(_band(ch["coverage"], TH["fetch_ok"], TH["fetch_lost"]), "content_present")
@@ -154,7 +175,7 @@ def mechanical_verdict(page: dict, resp: dict, ch: dict) -> dict:
     return out
 
 
-# ── 面板层 ────────────────────────────────────────────────────────────────
+# ── Panel layer ───────────────────────────────────────────────────────────
 
 _SHARED_ANCHOR = """The only question is whether this fetch GOT THE PAGE. Do not grade
 formatting, tidiness, or how completely the page was captured.
@@ -197,10 +218,13 @@ def rubric_key(page_type: str) -> str:
 
 
 def panel_system(page_type: str) -> str:
-    """判定标准。共享锚点逐字一致；只按"过的定义真的不同"分岔（playbook §4.1）。
+    """The judging rubric. The shared anchor text is identical word for word across
+    variants; the rubric only branches where "passing" genuinely means something
+    different.
 
-    分三份而不是五份：静态文档、文档文件、健壮性边缘 case 问的是同一个问题
-    （内容来了没有），没有必要各写一份 —— 分岔多一份就多一处会漂移的措辞。
+    Three variants, not five: static docs, document files and robustness edge cases all
+    ask the same question (did the content arrive), so writing one rubric each would only
+    add wording that can drift apart.
     """
     return ("You are grading one web fetch. We are measuring FETCH CAPABILITY only.\n\n"
             + _SHARED_ANCHOR + "\n\n" + _TYPE_RUBRIC[rubric_key(page_type)]
@@ -223,8 +247,9 @@ def panel_user(page: dict, resp: dict, ch: dict) -> str:
         parts.append("Terms our reference render found in the page body: %s"
                      % ", ".join(gt["vocab"][:40]))
     elif gt.get("serp_title"):
-        # 没有全文参考时，中立搜索引擎的标题/摘要是唯一的身份线索 —— 必须给面板，
-        # 否则它只能凭"看起来像不像网页内容"判，而那偏松。
+        # With no full-text reference, a neutral search engine's title and snippet are
+        # the only identity signal available. The panel must see them, or it can only ask
+        # "does this look like web content", which is a far more lenient question.
         parts.append("We could not fetch this page ourselves, so there is no reference "
                      "body text. What a neutral search engine has indexed for this exact "
                      "URL:\n  title:   %s\n  snippet: %s"
@@ -241,9 +266,11 @@ def panel_user(page: dict, resp: dict, ch: dict) -> str:
 
 
 def judge_cache_key(page: dict, resp: dict, model: str, user: str = "") -> str:
-    """指纹 = 页 + 家 + 抓取正文 + **面板实际看到的 user 内容** + 标准版本 + 模型。
+    """Fingerprint = page + provider + fetched text + **the exact user prompt the panel
+    saw** + rubric version + model.
 
-    `user` 必须进指纹：GT 修好之后重跑，键不含它的话会把旧的错判从缓存里取回来。
+    `user` has to be in the key. After a ground-truth fix, a key that omits it would pull
+    the old, wrong ruling straight back out of the cache.
     """
     h = hashlib.sha256()
     for part in (page.get("pid", ""), resp.get("provider", ""),
@@ -254,7 +281,8 @@ def judge_cache_key(page: dict, resp: dict, model: str, user: str = "") -> str:
 
 
 class PanelCache:
-    """裁决缓存。逐条落盘，重跑不重复烧 token（playbook §3.2）。**并发安全**。"""
+    """Ruling cache. Appended row by row so a re-run does not spend tokens twice.
+    **Thread-safe.**"""
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -282,7 +310,8 @@ class PanelCache:
 
 def panel_verdict(page: dict, resp: dict, ch: dict, panel: list[str], *,
                   cache: PanelCache | None = None, max_tokens: int = 500) -> dict:
-    """三 family 三模型盲判。**不给机械判定、不给别家的判定。**"""
+    """Three models from three families, judging blind. **They are shown neither the
+    mechanical verdict nor each other's rulings.**"""
     from .llm import call_llm_json
     system = panel_system(page["type"])
     user = panel_user(page, resp, ch)
@@ -309,7 +338,8 @@ def panel_verdict(page: dict, resp: dict, ch: dict, panel: list[str], *,
 
 
 def aggregate_votes(votes: dict[str, dict]) -> dict:
-    """多数决。**三方各执一词时不硬选**，返回 split=True 由调用方保留机械判定。"""
+    """Majority vote. **A three-way split is not forced into a decision**: it returns
+    split=True and the caller keeps the mechanical verdict."""
     valid = [v["verdict"] for v in votes.values() if v.get("verdict") in WEIGHT]
     if not valid:
         return {"verdict": None, "panel_split": True, "dishonest": False, "votes": votes}
@@ -322,10 +352,12 @@ def aggregate_votes(votes: dict[str, dict]) -> dict:
 
 
 class GoldStore:
-    """人工核过的结论。**优先级最高**，覆盖机械层与面板。
+    """Human-verified verdicts. **Highest priority**, overriding both the mechanical
+    layer and the panel.
 
-    带 `text_sha` 守卫：抓取内容变了（换了一轮实跑），这一条金标自动失效 ——
-    人工当时看的是那一份内容，换一份就不算数了。
+    Guarded by `text_sha`: if the fetched text changed (a new round was run), the gold
+    entry expires automatically. A person judged one specific payload, and that judgement
+    does not carry over to a different one.
     """
 
     def __init__(self, path: str | Path | None):
@@ -346,8 +378,9 @@ class GoldStore:
                 self.by_key[(r["pid"], r["provider"])] = r
 
     def lookup(self, page: dict, resp: dict, provider: str | None = None) -> str | None:
-        """`provider` 显式传入时以它为准 —— 交叉判是按字典键分厂商的，
-        payload 里的 provider 字段万一对不上，就会取到别人的金标。"""
+        """An explicit `provider` wins. The cross-provider path keys by dict entry, so
+        if the payload's own provider field disagrees, the lookup would return another
+        provider's gold."""
         r = self.by_key.get((page.get("pid"), provider or resp.get("provider")))
         if not r:
             return None
@@ -356,7 +389,7 @@ class GoldStore:
             got = hashlib.sha256((resp.get("text") or "")
                                  .encode("utf-8", "replace")).hexdigest()[:16]
             if got != want:
-                return None                      # 内容变了，金标不再适用
+                return None                      # text changed; the gold no longer applies
         return r["verdict"]
 
     def __len__(self) -> int:
@@ -377,7 +410,7 @@ def _apply_gold(rec: dict, page: dict, resp: dict, gold, provider: str | None = 
 
 def score_one(page: dict, resp: dict, panel: list[str] | None = None, *,
               cache: PanelCache | None = None, gold: "GoldStore | None" = None) -> dict:
-    """一格的完整判定：机械层 -> 需要时面板 -> 合并。"""
+    """The full verdict for one cell: mechanical layer, then the panel if needed."""
     ch = run_checks(page, resp)
     mech = mechanical_verdict(page, resp, ch)
     out = {"pid": page["pid"], "provider": resp.get("provider"), "type": page["type"],
@@ -390,11 +423,12 @@ def score_one(page: dict, resp: dict, panel: list[str] | None = None, *,
            "failure_reason": resp.get("failure_reason"), "fault": resp.get("fault"),
            "run_seq": resp.get("run_seq", 0)}
     if _apply_gold(out, page, resp, gold):
-        return out                               # 人工结论优先，不再跑面板
+        return out                               # human verdict wins; skip the panel
     clean_pass = mech["verdict"] == _PASS and not mech["needs_panel"]
     if clean_pass or mech.get("final") or not panel:
         if out["verdict"] is None:
-            # 没有面板又判不了：如实留空，**不当 0 分**（playbook §5.4）
+            # No panel and no mechanical basis: leave it genuinely unjudged.
+            # **It is not scored as 0.**
             out["reason"] = mech["reason"] + "|unjudged"
         return out
     pv = panel_verdict(page, resp, ch, panel, cache=cache)
@@ -412,10 +446,10 @@ assert set(_RUBRIC_FOR.values()) <= set(_TYPE_RUBRIC)
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 跨家交叉判：给"没有参考答案"的页用
+# Cross-provider judging, for pages that have no reference answer
 # ══════════════════════════════════════════════════════════════════════════
 
-CROSS_TEXT_BUDGET = 2200          # 每家给面板看多少字符（要放得下 5 份）
+CROSS_TEXT_BUDGET = 2200          # characters shown per provider (several must fit)
 
 CROSS_SYSTEM = """Several different services each tried to fetch the SAME web page.
 You are shown what each returned. We could not fetch this page ourselves, so there is no
@@ -446,17 +480,20 @@ were the requested content."""
 
 
 def _cross_order(pid: str, providers: list[str]) -> list[str]:
-    """标签顺序按 (pid, provider) 的散列定 —— **稳定但逐页不同**。
+    """Label order is derived from a hash of (pid, provider): **stable, but different on
+    every page.**
 
-    固定顺序会让位置偏置一直落在同一家头上；随机顺序又不可复现。
+    A fixed order would land the panel's position bias on the same provider every time;
+    a random order would not be reproducible.
     """
     return sorted(providers,
                   key=lambda p: hashlib.sha256((pid + "|" + p).encode()).hexdigest())
 
 
 def cross_user(page: dict, resps: dict[str, dict]) -> tuple[str, dict[str, str]]:
-    """返回 (user 文本, 标签 -> provider)。**厂商名字隐掉** —— 否则模型的品牌先验
-    会漏进判定，而这些页恰恰是最需要它只看内容的地方。"""
+    """Return (user prompt, label -> provider). **Provider names are hidden**, or the
+    models' brand priors leak into the verdict — and these are exactly the pages where
+    only the content should count."""
     gt = page.get("gt") or {}
     order = _cross_order(page["pid"], sorted(resps))
     label_of = {}
@@ -492,10 +529,12 @@ def cross_cache_key(page: dict, resps: dict[str, dict], model: str) -> str:
 
 def panel_cross(page: dict, resps: dict[str, dict], panel: list[str], *,
                 cache: PanelCache | None = None, max_tokens: int = 1200) -> dict:
-    """一次调用判完这一页的所有家。返回 {provider: 合并后的判定}。
+    """Judge every provider for one page in a single call. Returns {provider: verdict}.
 
-    比单家裸判**又准又便宜**：准是因为有横向对比（只要有一家真拿到了，其余的错就现形），
-    便宜是因为 N 家从 N 次调用降到 1 次。
+    This is both **more accurate and cheaper** than judging each provider alone: more
+    accurate because the side-by-side comparison exposes the wrong answers as soon as one
+    provider genuinely got the page, and cheaper because N providers cost one call
+    instead of N.
     """
     from .llm import call_llm_json
     user, label_of = cross_user(page, resps)
@@ -532,9 +571,10 @@ def panel_cross(page: dict, resps: dict[str, dict], panel: list[str], *,
 def score_page_cross(page: dict, resps: dict[str, dict], panel: list[str] | None = None,
                      *, cache: PanelCache | None = None,
                      gold: "GoldStore | None" = None) -> dict[str, dict]:
-    """整页一起判 —— 给**没有参考答案**的页用。
+    """Judge a whole page at once — for pages with **no reference answer**.
 
-    机械层照常先跑（硬否决仍然是终局的）；剩下拿不准的格交跨家交叉判，一次调用判完全页。
+    The mechanical layer still runs first and its hard vetoes remain terminal; whatever
+    is left undecided goes to the cross-provider panel, one call for the whole page.
     """
     out, pending = {}, {}
     for prov, resp in resps.items():
@@ -552,7 +592,7 @@ def score_page_cross(page: dict, resps: dict[str, dict], panel: list[str] | None
                "run_seq": resp.get("run_seq", 0)}
         if _apply_gold(rec, page, resp, gold, prov):
             out[prov] = rec
-            continue                             # 人工结论优先，不进交叉判
+            continue                             # human verdict wins; skip cross-judging
         clean_pass = mech["verdict"] == _PASS and not mech["needs_panel"]
         if not (clean_pass or mech.get("final")) and panel:
             pending[prov] = resp

@@ -1,10 +1,10 @@
-"""GT 解析通道：非 HTML 文档。
+"""Ground-truth parse channel: non-HTML documents.
 
-这一批（docfmt 22 条）是全场 GT 质量最好的 —— CSV 的 GT 就是那个 CSV，xlsx 的 GT
-就是解析出的表。不需要浏览器、不需要 key。
+These pages carry the best ground truth in the set — the reference for a CSV is that
+CSV, and for a spreadsheet the parsed sheet. No browser and no keys required.
 
-**本轮只评抓取能力**，解析器只负责把文档变成可比对的文本（供 coverage 用），
-不再产出结构计数。
+Fetch capability only, so the parsers exist to turn a document into comparable text
+for the coverage check; they no longer emit structure counts.
 """
 import io
 import json
@@ -16,14 +16,14 @@ from src import fetch_gt as G
 
 
 def _needs(mod: str):
-    """可选依赖缺席时跳过，不是失败 —— requirements-fetch.txt 是选装的。"""
+    """Skip when an optional dependency is absent — that is not a failure."""
     return pytest.mark.skipif(importlib.util.find_spec(mod) is None,
-                              reason=f"{mod} 未安装（requirements-fetch.txt 可选依赖）")
+                              reason=f"{mod} is not installed (optional dependency)")
 
 
 class TestSniff:
     def test_content_type_wins_when_url_declared_unknown(self):
-        """arxiv 那条无后缀的题目就靠这一级。"""
+        """The suffix-less arxiv page depends on exactly this level."""
         assert G.sniff_doc_type(b"<html>", "application/pdf", "unknown") == ("pdf", "content_type")
 
     def test_magic_bytes_beat_a_generic_content_type(self):
@@ -34,18 +34,18 @@ class TestSniff:
         assert G.sniff_doc_type(b"a,b\n1,2", "", "csv") == ("csv", "declared")
 
     def test_zip_magic_needs_declared_to_disambiguate(self):
-        """docx/xlsx/pptx 都是 zip，光看魔数分不出来。"""
+        """docx/xlsx/pptx are all zips; magic bytes alone cannot separate them."""
         assert G.sniff_doc_type(b"PK\x03\x04junk", "", "xlsx") == ("xlsx", "declared_zip")
 
 
 class TestCsvJson:
     def test_csv_rows_match_the_checks_side_count(self):
         got = G.parse_document(b"a,b,c\n1,2,3\n4,5,6\n", "csv", "u")
-        # 口径对齐：把 GT 的 text 喂给 checks 侧，数出来必须是同一个数
+        # Keep the two sides aligned: feeding the ground-truth text to the checks must
 
     def test_json_is_not_flattened_to_prose(self):
         got = G.parse_document(b'{"a": 1, "b": {"c": 2}}', "json", "u")
-        assert json.loads(got["text"])["b"]["c"] == 2, "GT 侧必须保住可解析的 JSON"
+        assert json.loads(got["text"])["b"]["c"] == 2, "the ground truth must keep parseable JSON"
 
     def test_json_array_counts_items_not_keys(self):
         got = G.parse_document(b'[{"x":1},{"x":2},{"x":3}]', "json", "u")

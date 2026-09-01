@@ -1,14 +1,18 @@
-"""GT 建库：把页面集跑成带 `gt` 的冻结文件。
+"""Build ground truth: turn the page set into a frozen file carrying `gt`.
 
-**分层建**（设计文档 §二）—— 强 GT 只建在主指标确实需要词表的那批上：
+**Built in layers** — strong ground truth is only built where the metric genuinely needs
+a vocabulary:
 
-  docfmt 22     解析通道。解析结果即 GT，全场质量最好的一批，不需要浏览器也不需要 key
-  baseline 8    headless。干净 HTML，秒取
-  render 18     headless。渲染本身就是要考的能力
-  antibot 42    真实 Chrome（要逐域授权，本脚本跑不了）。**主指标是过墙率，不需要文本 GT**
-  reliability 10  不需要文本 GT，只要 expect + probes
+  document files  parse channel. The parse result is the ground truth: the best quality
+                  in the set, needing neither a browser nor a key.
+  static docs     headless browser. Clean HTML, retrieved in moments.
+  render / SPA    headless browser. Rendering is the capability under test.
+  anti-bot        real Chrome. The metric is whether the wall was passed, so no text
+                  ground truth is required.
+  robustness      no text ground truth needed; expect and probes are enough.
 
-逐条落盘、按 pid 断点续跑。中途被杀不丢已建好的部分。
+Rows are appended as they are built and resume on pid, so being killed midway does not
+lose the work already done.
 """
 from __future__ import annotations
 
@@ -30,15 +34,16 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 
 
 def _load(path: Path) -> list[dict]:
-    # **按 "\n" 切，不能用 splitlines()**：后者还会在 U+2028 / U+2029 / U+0085 上切，
-    # 而那些字符在网页正文里合法出现、json.dumps 也不转义 —— 一条完整记录会被从
-    # 中间劈开，报出一个看不懂的 "Unterminated string"。实测 500 条抓取里就有。
+    # **Split on "\n" only — never splitlines().** The latter also splits on U+2028,
+    # U+2029 and U+0085, which occur legitimately in page text and which json.dumps does
+    # not escape. One record gets torn in half and surfaces as "Unterminated string".
     return [json.loads(l) for l in path.read_text(encoding="utf-8").split("\n") if l.strip()]
 
 
 def _done_keys(path: Path) -> set[tuple[str, str]]:
-    """已建的 (pid, 通道)。**键必须含通道** —— 防护强度档是两条通道的比对结果，
-    只按 pid 去重的话第二条通道会被整轮跳过，强度就永远算不出来。"""
+    """Completed (pid, channel) keys. **The channel has to be part of the key**: the
+    protection tier comes from comparing the two channels, and deduplicating on pid alone
+    skips the second channel entirely, leaving the tier permanently uncomputable."""
     if not path.exists():
         return set()
     out = set()
@@ -46,14 +51,15 @@ def _done_keys(path: Path) -> set[tuple[str, str]]:
         try:
             r = json.loads(line)
             out.add((r["pid"], (r.get("gt") or {}).get("channel", "?")))
-        except Exception:                        # noqa: BLE001  坏行跳过，不让整轮起不来
+        except Exception:                        # noqa: BLE001  skip a corrupt line
             continue
     return out
 
 
 def consolidate(path: Path) -> int:
-    """同一 pid 的多条通道记录合并成一条：内容取**成功那条**（真 Chrome 优先），
-    两条通道的成败标记都保留下来给强度档用。"""
+    """Merge a pid's per-channel rows into one: content comes from **whichever channel
+    succeeded** (real Chrome preferred), and both channels' success flags are kept so the
+    protection tier can be derived."""
     rows = _load(path)
     merged: dict[str, dict] = {}
     for r in rows:
@@ -66,10 +72,10 @@ def consolidate(path: Path) -> int:
         pg = prev.get("gt") or {}
         flags = {k: v for k, v in list(pg.items()) + list(g.items())
                  if k in ("headless_ok", "chrome_ok")}
-        # 真 Chrome 拿到内容就用它的；否则保留原先那条有内容的
+        # Prefer real Chrome when it retrieved content; otherwise keep the row that has it
         better = r if (g.get("channel") == "chrome_real" and g.get("vocab_n")) else (
             r if (g.get("vocab_n") and not pg.get("vocab_n")) else prev)
-        better = json.loads(json.dumps(better))          # 不改原对象
+        better = json.loads(json.dumps(better))          # do not mutate the original
         better["gt"].update(flags)
         merged[pid] = better
     with path.open("w", encoding="utf-8") as f:
@@ -79,7 +85,7 @@ def consolidate(path: Path) -> int:
 
 
 def _channel_of(page: dict, browser_channel: str) -> str:
-    """这一页会走哪条通道 —— 非 HTML 一律解析通道，与浏览器通道无关。"""
+    """Which channel this page takes: anything non-HTML goes to the parse channel."""
     return "parse" if page["doc_type"] != "html" else browser_channel
 
 
@@ -89,7 +95,7 @@ def _raw_text(html: str) -> str:
 
 
 def build_parse(page: dict, timeout: int, sidecar: Path | None = None) -> dict:
-    """解析通道：下原始字节 -> 嗅探真实类型 -> 类型化解析。"""
+    """Parse channel: download raw bytes, sniff the real type, parse accordingly."""
     try:
         r = requests.get(page["url"], timeout=timeout, headers={"User-Agent": UA})
     except Exception as e:                       # noqa: BLE001
@@ -99,7 +105,7 @@ def build_parse(page: dict, timeout: int, sidecar: Path | None = None) -> dict:
                                 page.get("doc_type", "unknown"))
     parsed = G.parse_document(r.content, dt, page["url"])
     _save_raw(sidecar, page["pid"], parsed["text"], "")
-    v = G.derive_vocab(parsed["text"], "")       # 文档没有 nav/footer，样板词表天然为空
+    v = G.derive_vocab(parsed["text"], "")       # documents have no chrome to exclude
     return {"channel": "parse", "http_status": r.status_code,
             "doc_type_observed": dt, "doc_type_rule": rule,
             "struct": parsed["struct"], "rule": parsed["rule"],
@@ -108,8 +114,9 @@ def build_parse(page: dict, timeout: int, sidecar: Path | None = None) -> dict:
 
 
 def _save_raw(sidecar: Path | None, pid: str, main: str, boiler: str) -> None:
-    """把原始正文与样板文本另存一份。**派生口径一改就要重跑整轮浏览器**，代价太大 ——
-    今晚为了给锚点换个来源就白跑了一遍 58 页。存下来之后 `--rederive` 可以离线重算。"""
+    """Keep a copy of the raw body and chrome text. **Changing how anything is derived
+    would otherwise mean re-running the whole browser pass**, which is expensive; with
+    the sidecar, `--rederive` recomputes offline."""
     if not sidecar:
         return
     append(sidecar, {"pid": pid, "main_text": main, "boiler_text": boiler})
@@ -118,7 +125,8 @@ def _save_raw(sidecar: Path | None, pid: str, main: str, boiler: str) -> None:
 def build_browser(page: dict, timeout: int, shots: str | None,
                   sidecar: Path | None = None,
                   channel_name: str = "playwright_headless") -> dict:
-    """浏览器通道：渲染后取正文与样板两侧，另算"仅渲染后可见"的锚点。"""
+    """Browser channel: after rendering, take both the body and the chrome, and derive
+    the anchors that are only visible once rendered."""
     got = G.render_page(page["url"], channel=channel_name, timeout=timeout,
                         screenshot_dir=shots, pid=page["pid"])
     if got.get("rule") != "rendered":
@@ -131,7 +139,8 @@ def build_browser(page: dict, timeout: int, shots: str | None,
     walled = G.gt_is_walled(got["main_text"], got.get("title", ""))
     render_anchors: list[str] = []
     if page["type"] == "render":
-        # 渲染型的主指标要的是"JS 执行后才出现"的词：渲染结果减去原始 HTTP 响应体
+        # For render pages the metric needs words that only appear after JavaScript:
+        # the rendered result minus the raw HTTP response body
         try:
             raw = requests.get(page["url"], timeout=timeout,
                                headers={"User-Agent": UA}).text
@@ -142,7 +151,8 @@ def build_browser(page: dict, timeout: int, shots: str | None,
     ok = bool(v.get("vocab_n")) and not walled
     flag = "chrome_ok" if channel_name == "chrome_real" else "headless_ok"
     return {"channel": channel_name, flag: ok,
-            # 墙页渲染"成功"且有词表 —— 只看 vocab_n 兜不住，必须显式标出来
+            # A wall renders "successfully" and produces a vocabulary; vocab_n alone
+            # cannot catch that, so it has to be flagged explicitly
             "rule": "rendered_wall" if walled else "rendered",
             "gt_wall_hit": walled,
             "http_status": got.get("http_status"), "title": got.get("title", ""),
@@ -152,13 +162,15 @@ def build_browser(page: dict, timeout: int, shots: str | None,
 
 
 def backfill_gaps(path: Path) -> list[dict]:
-    """标 GT 缺口。**两类都要标**：
+    """Flag ground-truth gaps. **Both kinds have to be flagged:**
 
-      建不出来   `expect == content` 的页却没有词表
-      建成了墙   渲染"成功"、有词表，但拿到的是验证页 —— w3.org 实测就是这样，
-                 只看 vocab_n 兜不住，而不标的话全场都在跟一张验证页比对
+      could not build   a page where `expect == content` yet no vocabulary exists
+      built a wall      the render "succeeded" and produced a vocabulary, but what came
+                        back was a challenge screen. vocab_n alone cannot catch this, and
+                        unflagged it means every provider is compared against a challenge
+                        page.
 
-    缺口页的词表照旧留在文件里供排查，但判定器会跳过它们（见 fetch_score.run_checks）。
+    A gap page keeps its vocabulary in the file for inspection, but the judge skips it.
     """
     rows = _load(path)
     gaps = []
@@ -178,16 +190,18 @@ def backfill_gaps(path: Path) -> list[dict]:
 
 
 def backfill_strength(path: Path) -> dict:
-    """防护强度 = 两条 GT 通道的比对结果（设计文档 一.4）。
+    """Protection strength is the comparison of the two ground-truth channels.
 
-    **真 Chrome 没跑过时必须是 unknown，不能默认 hard** —— 那会把"没测"伪装成
-    "测出来最难"，凭空给这一列添一档不存在的结论。
+    **When real Chrome never ran the answer is unknown, never hard.** Defaulting to hard
+    disguises "not measured" as "measured, hardest" and invents a tier that was never
+    established.
     """
     rows = _load(path)
     counts: Counter = Counter()
     for r in rows:
         g = r["gt"] or {}
-        # 旧版本建的行没有显式标记，从通道与结果反推一次（成功 = 有词表且不是墙页）
+        # Rows built by an older version carry no explicit flags; infer them once from
+        # the channel and the result (success = has a vocabulary and is not a wall)
         if "headless_ok" not in g and g.get("channel") == "playwright_headless":
             g["headless_ok"] = bool(g.get("vocab_n")) and not g.get("gt_wall_hit")
         if "chrome_ok" not in g and g.get("channel") == "chrome_real":
@@ -203,20 +217,24 @@ def backfill_strength(path: Path) -> dict:
 
 
 def backfill_anchors(path: Path) -> int:
-    """**第二遍扫**：先收集全场词表算文档频率，再给每页定独有锚点。
+    """**A second pass**: collect every page's vocabulary to compute document frequency,
+    then choose each page's distinctive anchors.
 
-    必须是第二遍 —— "独有"是相对全集说的，建第一页时还不知道别的页有什么。
-    漏掉这一遍的后果是静默的：`gt.anchors` 缺失 -> `identity_ok` 永远返回 None ->
-    "返回错页"那条全型硬否决**看着实现了但从来不生效**。而它抓的正是最坏的一类
-    静默失败（退回父页 / 索引页 / 搜索结果页），下游发现不了。
+    It has to be a second pass — "distinctive" is relative to the whole set, and while
+    building the first page nothing is known about the others. Skipping it fails
+    silently: `gt.anchors` is missing, `identity_ok` always returns None, and the
+    wrong-page veto **looks implemented but never fires**. That veto catches the worst
+    class of silent failure — falling back to a parent, index or search page — which
+    nothing downstream can detect.
     """
     rows = _load(path)
     n = len(rows)
     df: Counter = Counter()
     for r in rows:
         g = r["gt"] or {}
-        # **标题词也要进 df**：解析通道把文件名当标题，pdf / txt 这类词只出现在文件名里，
-        # 只统计 vocab 的话它们的 df 是 0，一路混进锚点。
+        # **Title words count towards document frequency too.** The parse channel uses
+        # the filename as the title, so format words appear only there; counting the
+        # vocabulary alone gives them a frequency of zero and they slip into the anchors.
         terms = set(g.get("vocab") or []) | set(G.tokenize(g.get("title") or ""))
         df.update(terms)
     filled = 0
@@ -226,7 +244,7 @@ def backfill_anchors(path: Path) -> int:
                                    g.get("vocab_head") or g.get("vocab") or [],
                                    df, n, url=r.get("url", ""))
         g["anchors"] = anchors
-        g["anchors_df_pages"] = n          # 锚点是相对这 n 页算的，报告里要能说清
+        g["anchors_df_pages"] = n          # anchors are relative to these n pages
         if anchors:
             filled += 1
     with path.open("w", encoding="utf-8") as f:
@@ -242,22 +260,23 @@ def main() -> None:
     ap.add_argument("--types", nargs="+", default=["docfmt", "baseline", "render"])
     ap.add_argument("--timeout", type=int, default=45)
     ap.add_argument("--limit", type=int)
-    ap.add_argument("--concurrency", type=int, default=6, help="仅用于解析通道")
-    ap.add_argument("--shots", default=None, help="截图目录（浏览器通道）")
+    ap.add_argument("--concurrency", type=int, default=6, help="parse channel only")
+    ap.add_argument("--shots", default=None, help="screenshot directory (browser channel)")
     ap.add_argument("--channel", default="playwright_headless",
                     choices=["playwright_headless", "chrome_real"],
-                    help="浏览器通道。chrome_real 启动本机真实 Chrome（有头、干净 profile、不登录）")
-    ap.add_argument("--sidecar", help="另存原始正文，供 --rederive 离线重算")
+                    help="browser channel; chrome_real launches the locally installed "
+                         "Chrome (headed, clean profile, never signed in)")
+    ap.add_argument("--sidecar", help="keep raw body text so --rederive can recompute offline")
     ap.add_argument("--anchors-only", action="store_true",
-                    help="只跑锚点回填（第二遍扫），不重新抓页")
+                    help="run only the anchor backfill (second pass); fetch nothing")
     a = ap.parse_args()
 
     sidecar = Path(a.sidecar) if a.sidecar else None
     if a.anchors_only:
         gg = backfill_gaps(Path(a.out))
-        print("GT 缺口 %d 条: %s" % (len(gg), [(g["pid"], g["why"]) for g in gg]))
-        print("锚点回填：%d 条有独有锚点" % backfill_anchors(Path(a.out)))
-        print("防护强度档：%s" % backfill_strength(Path(a.out)))
+        print("%d ground-truth gaps: %s" % (len(gg), [(g["pid"], g["why"]) for g in gg]))
+        print("anchor backfill: %d pages have distinctive anchors" % backfill_anchors(Path(a.out)))
+        print("protection tiers: %s" % backfill_strength(Path(a.out)))
         return
     pages = [p for p in _load(Path(a.pageset)) if p["type"] in set(a.types)]
     pages.sort(key=lambda p: p["pid"])
@@ -266,16 +285,18 @@ def main() -> None:
     out = Path(a.out)
     done = _done_keys(out)
     todo = [p for p in pages if (p["pid"], _channel_of(p, a.channel)) not in done]
-    print("目标 %d 条，已建 %d 条，待建 %d 条" % (len(pages), len(pages) - len(todo), len(todo)))
+    print("target %d pages, %d already built, %d to build"
+          % (len(pages), len(pages) - len(todo), len(todo)))
 
-    # **按 doc_type 路由，不按 type。** 无后缀的 arxiv 那条属于 reliability 型但它是
-    # PDF —— 送进浏览器只会拿到 PDF 阅读器外壳。unknown 也走解析通道，嗅探会定下来。
+    # **Route by doc_type, not by page type.** A suffix-less PDF may sit in the
+    # robustness type, but sending it to a browser only yields the PDF viewer shell.
+    # Unknown also takes the parse channel, where sniffing settles it.
     parse_jobs = [p for p in todo if p["doc_type"] != "html"]
     browser_jobs = [p for p in todo if p["doc_type"] == "html"]
     t0, n = time.time(), 0
     total = len(todo)
 
-    # 解析通道：纯 HTTP，可并发
+    # Parse channel: plain HTTP, safe to run concurrently
     if parse_jobs:
         with ThreadPoolExecutor(max_workers=a.concurrency) as ex:
             futs = {ex.submit(build_parse, p, a.timeout, sidecar): p for p in parse_jobs}
@@ -291,7 +312,7 @@ def main() -> None:
                 if (s := progress(n, total, t0)):
                     print(s)
 
-    # 浏览器通道：playwright 同步 API 顺序跑，一次一个 driver
+    # Browser channel: the synchronous API runs sequentially, one driver at a time
     for p in browser_jobs:
         try:
             gt = build_browser(p, a.timeout, a.shots, sidecar, a.channel)
@@ -305,28 +326,31 @@ def main() -> None:
 
     dropped = consolidate(out)
     if dropped:
-        print("多通道记录合并：%d 条重复行并入" % dropped)
+        print("merged multi-channel rows: %d duplicates folded in" % dropped)
     walled = [r["pid"] for r in _load(out) if r["gt"].get("gt_wall_hit")]
     if walled:
-        print("!! GT 自己被拦的 %d 条（必须标缺口，否则全场跟一张验证页比对）: %s"
+        print("!! ground truth itself was blocked on %d pages (flagged as gaps; "
+              "otherwise every provider is compared against a challenge screen): %s"
               % (len(walled), walled))
     gaps = backfill_gaps(out)
     if gaps:
-        print("GT 缺口 %d 条（判定器会跳过它们的词表）: %s"
+        print("%d ground-truth gaps (the judge skips their vocabulary): %s"
               % (len(gaps), [(g["pid"], g["why"]) for g in gaps]))
     filled = backfill_anchors(out)
-    print("锚点回填：%d 条有独有锚点" % filled)
-    print("防护强度档：%s（真 Chrome 没跑过的一律 unknown，不默认 hard）"
+    print("anchor backfill: %d pages have distinctive anchors" % filled)
+    print("protection tiers: %s (unknown wherever real Chrome never ran; never hard by default)"
           % backfill_strength(out))
     rows = _load(out)
     ok = [r for r in rows if r["gt"].get("vocab_n")]
     degen = [r["pid"] for r in rows if r["gt"].get("degenerate")]
     failed = [(r["pid"], r["gt"].get("rule")) for r in rows if not r["gt"].get("vocab_n")]
-    print("\n落盘 %d 条；有词表 %d 条" % (len(rows), len(ok)))
-    print("退化页（vocab_n < 12，走面板不走机械阈值）%d 条: %s" % (len(degen), degen))
+    print("\nwrote %d rows; %d carry a vocabulary" % (len(rows), len(ok)))
+    print("degenerate pages (vocab_n below the minimum; judged by panel, not by "
+          "threshold): %d %s" % (len(degen), degen))
     if failed:
-        # 建不出来的要喊出来，不能留个空 gt 让下游当成"这页没内容"
-        print("!! 没建出词表的 %d 条: %s" % (len(failed), failed))
+        # Say so out loud; an empty gt left in place reads downstream as "this page has
+        # no content"
+        print("!! no vocabulary could be built for %d pages: %s" % (len(failed), failed))
 
 
 if __name__ == "__main__":

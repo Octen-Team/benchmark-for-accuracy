@@ -1,6 +1,8 @@
-"""CSV -> 页面集 JSONL。**输入先拷进 data/ 版本化**，原文件不动。
+"""CSV -> page-set JSONL. **The input is copied into data/ and versioned** first; the
+original file is left untouched.
 
-只做机械转写与标签挂载；GT 由 fetch_gt 回写到 `.gt.jsonl`。
+This does mechanical transcription and label attachment only. Ground truth is written
+back separately, into a `.gt.jsonl` sidecar.
 """
 from __future__ import annotations
 
@@ -16,8 +18,9 @@ from src import fetch_spec as S
 
 
 def label_for(url: str) -> dict:
-    """URL 子串匹配逐页标签。**多条命中时 probes 取并集** —— gutenberg 同时是
-    oversize 与 raw_direct，后一条覆盖前一条就丢了一个探针。"""
+    """Attach per-page labels by URL substring. **When several rules match, probes are
+    unioned** — one page can be both oversize and a raw direct link, and letting the
+    later rule overwrite the earlier one silently drops a probe."""
     expect, probes = "content", []
     for frag, lab in S.PAGE_LABELS.items():
         if frag in url:
@@ -34,7 +37,7 @@ def build(csv_path: Path, out_path: Path, *, run_assert: bool = True) -> list[di
     for i, r in enumerate(raw, 1):
         url, cat = r["url"].strip(), r["category"].strip()
         host = urlparse(url).netloc
-        typ = S.CATEGORY_TO_TYPE[cat]      # 未知类别就该 KeyError，不静默兜底
+        typ = S.CATEGORY_TO_TYPE[cat]      # an unknown category should raise, not default
         dt, rule = S.doc_type_from_url(url)
         rows.append({
             "pid": "p%03d" % i,
@@ -62,24 +65,24 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--archive", help="把输入 CSV 拷到这里版本化")
+    ap.add_argument("--archive", help="copy the input CSV here to version it")
     ap.add_argument("--no-assert", action="store_true",
-                    help="跳过 100 条边际断言（仅单测小样本用）")
+                    help="skip the page-count assertions (for small test samples only)")
     a = ap.parse_args()
     if a.archive:
         shutil.copy2(a.csv, a.archive)
     rows = build(Path(a.csv), Path(a.out), run_assert=not a.no_assert)
-    print("写出 %d 条 -> %s" % (len(rows), a.out))
+    print("wrote %d rows -> %s" % (len(rows), a.out))
     for t, n in sorted(Counter(r["type"] for r in rows).items()):
         print("  %-12s %d" % (t, n))
     sub = Counter(r["antibot_subclass"] for r in rows if r["antibot_subclass"])
-    print("  反爬小类 %s" % dict(sub))
+    print("  anti-bot sub-classes %s" % dict(sub))
     missing = sorted({r["host"] for r in rows
                       if r["type"] == "antibot" and not r["antibot_subclass"]})
     if missing:
-        # 留 None 悄悄过去，报告里那几页就没有小类可切 —— 必须喊出来
-        print("  !! 反爬小类查不到的 host（补进 fetch_spec 三张清单）: %s" % missing)
-    print("  带 probe 的页 %d 条" % sum(1 for r in rows if r["probes"]))
+        # Letting None through silently leaves those pages unsliceable in the report
+        print("  !! hosts with no anti-bot sub-class (add them to fetch_spec): %s" % missing)
+    print("  %d pages carry a probe" % sum(1 for r in rows if r["probes"]))
 
 
 if __name__ == "__main__":

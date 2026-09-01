@@ -1,10 +1,13 @@
-"""把人工核对页导出的标注收进金标文件。
+"""Collect the marks exported from the human review page into the gold file.
 
-金标**优先级最高**：判定时直接采用，覆盖机械层与面板。这批页本来是全场证据最弱的
-（我们自己的浏览器也抓不到，没有参考答案），人工核过之后反而成了最硬的一批，
-而且以后每一轮都复用 —— 只要那一格的抓取内容没变。
+Gold has **the highest priority**: the judge adopts it directly, overriding both the
+mechanical layer and the panel. These pages start as the weakest evidence in the set —
+our own browser cannot fetch them, so no reference answer exists — and become the
+strongest once a person has checked them. The verdicts are reused by every later round,
+for as long as that cell's fetched content is unchanged.
 
-`unsure` 不写进金标：拿不准就让它继续走面板，人工的"我也说不准"不该固化成结论。
+`unsure` is never written to gold: an uncertain cell should keep going to the panel, and
+a reviewer's "I cannot tell" must not harden into a conclusion.
 """
 from __future__ import annotations
 
@@ -18,10 +21,10 @@ VALID = {"pass", "partial", "lost"}
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--marks", help="人工核对页导出的 JSONL 文件；不给则从 stdin 读")
+    ap.add_argument("--marks", help="JSONL exported by the review page; reads stdin if omitted")
     ap.add_argument("--out", default="data/fetch_gold_gap.jsonl")
     ap.add_argument("--extractions", required=True,
-                    help="用来记抓取内容的指纹 —— 内容变了金标要失效")
+                    help="source of the text fingerprint; gold expires when the text changes")
     a = ap.parse_args()
 
     raw = (Path(a.marks).read_text(encoding="utf-8") if a.marks else sys.stdin.read())
@@ -41,7 +44,7 @@ def main() -> None:
     for m in marks:
         v = m.get("human_verdict")
         if v not in VALID:
-            skipped += 1              # unsure / 空 —— 让它继续走面板
+            skipped += 1              # unsure or blank: keep sending it to the panel
             continue
         key = (m["pid"], m["provider"])
         out.append({"pid": m["pid"], "provider": m["provider"], "verdict": v,
@@ -52,11 +55,11 @@ def main() -> None:
     with path.open("w", encoding="utf-8") as f:
         for r in out:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    print("金标写出 %d 条 -> %s（跳过 %d 条拿不准的，它们继续走面板）"
+    print("wrote %d gold entries -> %s (skipped %d uncertain, which keep going to the panel)"
           % (len(out), path, skipped))
     missing = sum(1 for r in out if not r["text_sha"])
     if missing:
-        print("!! %d 条在抓取结果里找不到对应内容 —— 它们的金标不会生效" % missing)
+        print("!! %d marks have no matching fetched text; their gold will not apply" % missing)
 
 
 if __name__ == "__main__":

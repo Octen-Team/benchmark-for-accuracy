@@ -1,4 +1,5 @@
-"""GT 建库脚本的多通道续跑与合并。防护强度档依赖两条通道各跑一遍。"""
+"""Multi-channel resume and merge for the ground-truth build script. The strength
+tier depends on both channels having run."""
 import json
 
 from scripts import fetch_gt_build as B
@@ -10,7 +11,8 @@ def _write(path, rows):
 
 
 def test_resume_key_includes_the_channel(tmp_path):
-    """只按 pid 去重的话第二条通道整轮被跳过，强度档永远算不出来。"""
+    """Deduplicating on pid alone would skip the entire second channel, leaving the
+    strength tier permanently uncomputable."""
     p = tmp_path / "gt.jsonl"
     _write(p, [{"pid": "p1", "gt": {"channel": "playwright_headless"}}])
     keys = B._done_keys(p)
@@ -36,7 +38,7 @@ def test_consolidate_keeps_both_channel_flags(tmp_path):
     assert len(rows) == 1
     g = rows[0]["gt"]
     assert g["headless_ok"] is False and g["chrome_ok"] is True
-    assert g["vocab_n"] == 30, "内容应取真 Chrome 那条"
+    assert g["vocab_n"] == 30, "content must come from the real-Chrome channel"
 
 
 def test_strength_needs_both_channels(tmp_path):
@@ -57,7 +59,8 @@ def test_strength_needs_both_channels(tmp_path):
 
 
 def test_unknown_is_not_silently_hard(tmp_path):
-    """真 Chrome 没跑过时默认 hard 会把"没测"伪装成"测出来最难"。"""
+    """Defaulting to hard when real Chrome never ran disguises "not measured" as
+    "measured, hardest"."""
     p = tmp_path / "gt.jsonl"
     _write(p, [{"pid": "x", "gt": {"channel": "playwright_headless", "headless_ok": False}}])
     B.backfill_strength(p)

@@ -1,8 +1,9 @@
-"""JSONL 读取的分行口径。
+"""How JSONL is split into lines.
 
-**按 "\\n" 切，不能用 splitlines()** —— 后者还会在 U+2028 / U+2029 / U+0085 上切，
-而那些字符在网页正文里合法出现、`json.dumps` 也不转义。500 条抓取里实测就有一条，
-表现是一个看不懂的 `Unterminated string`，而逐行迭代文件时又复现不出来。
+**Split on "\\n" only — never splitlines().** The latter also splits on U+2028,
+U+2029 and U+0085, which occur legitimately in page text and which `json.dumps`
+does not escape. The symptom is a baffling `Unterminated string` that cannot be
+reproduced by iterating the file line by line.
 """
 import json
 
@@ -35,14 +36,14 @@ def test_ordinary_records_still_load(tmp_path, load):
 
 
 def test_splitlines_would_have_broken_it():
-    """把被修掉的写法钉在这里，免得有人"顺手改回去"。"""
+    """Pin the broken form here so nobody quietly reinstates it."""
     line = json.dumps({"text": "a\u2028b"}, ensure_ascii=False)
-    assert len(line.splitlines()) == 2, "splitlines 确实会劈开它"
+    assert len(line.splitlines()) == 2, "splitlines really does tear this in half"
     assert len(line.split("\n")) == 1
 
 
 def test_resume_keys_survive_the_same_characters(tmp_path):
-    """续跑的键也走同一条读取路径 —— 它坏了会把已完成的格当成没跑。"""
+    """The resume key uses the same reader; if it breaks, finished cells look unrun."""
     p = tmp_path / "x.jsonl"
     rec = {"pid": "p001", "provider": "octen", "run_seq": 0, "text": "a\u2028b"}
     p.write_text(json.dumps(rec, ensure_ascii=False) + "\n", encoding="utf-8")

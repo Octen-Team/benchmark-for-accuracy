@@ -1,11 +1,14 @@
-"""GT 缺口页的人工核对页。
+"""A human review page for ground-truth gap pages.
 
-这些页我们自己的浏览器也抓不到，判定完全依赖面板 —— 是全场证据最弱的一批。
-页数很少（本轮 18 页），人工扫一遍就能把它们从"最不可信"变成"金标"，
-而且金标可以被后续每一轮复用。
+Our own browser cannot fetch these either, so their verdicts rest entirely on the
+panel — the weakest evidence in the set. There are few of them, and one pass by a
+person turns them from the least trustworthy cells into gold, which every later
+round then reuses.
 
-页面把每一页的五家返回**并排**列出来，附上我们能拿到的唯一参考（中立搜索引擎的
-标题与摘要），以及当前判定。人眼要做的只有一件事：这一段是不是这一页的内容。
+The page lists every provider's return for a page **side by side**, together with
+the only reference available (a neutral search engine's title and snippet) and the
+current verdict. The reviewer answers one question: is this the content of this
+page.
 """
 from __future__ import annotations
 
@@ -56,7 +59,7 @@ body{background:var(--rv-bg);color:var(--rv-ink);margin:0;padding:2.5rem 1.25rem
   max-height:8.5rem;overflow:auto}
 .rv-meta{color:var(--rv-mut);font-size:.85rem}
 
-/* 标注 */
+/* Marking */
 .rv-mark{display:flex;gap:.25rem;flex-wrap:wrap;margin:.3rem 0 0}
 .rv-mark button{font:500 .74rem/1 ui-sans-serif,sans-serif;padding:.3rem .5rem;
   border:1px solid var(--rv-line);border-radius:5px;background:transparent;
@@ -108,32 +111,40 @@ def build(pageset: Path, extractions: Path, verdicts: Path) -> str:
     gaps.sort(key=lambda r: r["pid"])
     provs = sorted({k[1] for k in ext})
 
-    H = ["<title>缺口页人工核对</title>", "<style>%s</style>" % CSS,
+    H = ["<title>Gap page review</title>", "<style>%s</style>" % CSS,
          '<div class="rv-wrap">',
-         '<div><h1 class="rv-h1">这 %d 页，机器判不准</h1>'
-         '<p class="rv-lede">我们自己的浏览器也抓不到它们，所以没有参考答案，'
-         '判定完全依赖模型面板 —— 全场证据最弱的一批。每页把五家的返回并排列出，'
-         '附上唯一能拿到的参考（中立搜索引擎为这条 URL 收录的标题与摘要）。'
-         '人眼只需回答一件事：<strong>这一段是不是这一页的内容。</strong></p></div>']
+         '<div><h1 class="rv-h1">%d pages the automated judge cannot settle</h1>'
+         '<p class="rv-lede">Our own browser cannot fetch these either, so '
+         'there is no reference answer and the verdicts rest entirely on the '
+         'model panel &mdash; the weakest evidence in the set. Each page lists '
+         'every provider&rsquo;s return side by side, with the only reference '
+         'available: the title and snippet a neutral search engine holds for '
+         'this URL. You only need to answer one question: <strong>is this the '
+         'content of this page?</strong></p></div>']
 
     for r in gaps:
         g = r.get("gt") or {}
         tags = [t for t in (r.get("antibot_subclass"),
-                            {"hard": "硬档", "medium": "中档", "soft": "软档"}.get(g.get("strength")),
-                            "验证页" if g.get("gt_wall_hit") else None,
-                            "搜索引擎也没收录" if g.get("anchor_source") != "serp" else None) if t]
+                            {"hard": "hard", "medium": "medium",
+                             "soft": "soft"}.get(g.get("strength")),
+                            "challenge screen" if g.get("gt_wall_hit") else None,
+                            "not indexed anywhere"
+                            if g.get("anchor_source") != "serp" else None) if t]
         H.append('<div class="rv-page">')
         H.append('<div class="rv-head"><span class="rv-pid">%s</span>'
                  '<span class="rv-url">%s</span>%s</div>'
                  % (r["pid"], html.escape(r["url"]),
                     "".join('<span class="rv-tag">%s</span>' % html.escape(t) for t in tags)))
         if g.get("serp_title"):
-            H.append('<div class="rv-ref"><b>搜索引擎收录的标题</b>：%s<br><b>摘要</b>：%s</div>'
+            H.append('<div class="rv-ref"><b>Indexed title</b>: %s<br>'
+                     '<b>Snippet</b>: %s</div>'
                      % (html.escape(g["serp_title"]),
-                        html.escape(g.get("serp_snippet") or "（无）")))
+                        html.escape(g.get("serp_snippet") or "(none)")))
         else:
-            H.append('<div class="rv-ref rv-none">这条 URL 搜索引擎也没有收录 —— '
-                     '完全没有参考，只能靠五家横向对比。</div>')
+            H.append('<div class="rv-ref rv-none">No search engine has '
+                     'indexed this URL either, so there is no reference at '
+                     'all &mdash; only the side-by-side comparison between '
+                     'providers.</div>')
         H.append('<div class="rv-rows">')
         for prov in provs:
             e, v = ext.get((r["pid"], prov)), ver.get((r["pid"], prov))
@@ -148,39 +159,42 @@ def build(pageset: Path, extractions: Path, verdicts: Path) -> str:
                 why = first.get("why") or ""
             text = (e.get("text") or "").strip()
             body = (html.escape(text[:PREVIEW]) + ("…" if len(text) > PREVIEW else "")
-                    ) if text else '<span class="rv-none">（该服务报错：%s）</span>' % html.escape(
+                    ) if text else '<span class="rv-none">(this provider errored: %s)</span>' % html.escape(
                         e.get("failure_reason") or "error")
             key = "%s|%s" % (r["pid"], prov)
             marks = "".join(
                 '<button type="button" data-k="%s" data-v="%s" aria-pressed="false">%s</button>'
                 % (key, code, label)
-                for code, label in (("pass", "对"), ("partial", "部分"),
-                                    ("lost", "错"), ("unsure", "拿不准")))
+                for code, label in (("pass", "correct"), ("partial", "partial"),
+                                    ("lost", "wrong"), ("unsure", "not sure")))
             H.append('<div class="rv-row" data-row="%s"><div class="rv-prov">%s</div>'
                      '<div><span class="rv-v %s">%s</span>'
                      '<p class="rv-why">%s</p>'
                      '<div class="rv-mark">%s</div></div>'
                      '<pre class="rv-text">%s</pre></div>'
-                     % (key, prov, _v_class(verdict), verdict or "判不了",
+                     % (key, prov, _v_class(verdict), verdict or "unjudged",
                         html.escape((why or "")[:90]), marks, body))
         accept = json.dumps({("%s|%s" % (r["pid"], p)): (ver.get((r["pid"], p), {}) or {}).get("verdict")
                              for p in provs if (r["pid"], p) in ext}, ensure_ascii=False)
         H.append('<button type="button" class="rv-accept" data-accept=\'%s\'>'
-                 '这一页当前判定都对 —— 一键采纳</button>' % html.escape(accept, quote=False))
+                 'Every current verdict on this page is correct &mdash; accept '
+                 'all</button>' % html.escape(accept, quote=False))
         H.append("</div></div>")
 
     total_cells = sum(1 for r in gaps for p in provs if (r["pid"], p) in ext)
     H.append('<div class="rv-bar">'
-             '<span class="rv-prog"><span id="rv-n">0</span> / %d 已标</span>'
-             '<button type="button" id="rv-export">导出结果</button>'
-             '<button type="button" class="rv-ghost" id="rv-copy">复制</button>'
-             '<button type="button" class="rv-ghost" id="rv-clear">清空</button>'
-             '<span class="rv-meta">标注存在本地浏览器里，刷新不丢。</span>'
+             '<span class="rv-prog"><span id="rv-n">0</span> / %d marked</span>'
+             '<button type="button" id="rv-export">Export</button>'
+             '<button type="button" class="rv-ghost" id="rv-copy">Copy</button>'
+             '<button type="button" class="rv-ghost" id="rv-clear">Clear</button>'
+             '<span class="rv-meta">Marks are stored in this browser and '
+             'survive a refresh.</span>'
              '<textarea class="rv-out" id="rv-out" readonly '
-             'aria-label="导出的标注结果"></textarea></div>' % total_cells)
-    H.append('<p class="rv-meta">共 %d 页 × %d 家 = %d 格。导出后存成 '
-             '<code>data/fetch_gold_gap.jsonl</code>，再跑一次判定即可 —— '
-             '人工结论优先级最高，会覆盖面板，并且以后每一轮都复用。</p>'
+             'aria-label="exported marks"></textarea></div>' % total_cells)
+    H.append('<p class="rv-meta">%d pages &times; %d providers = %d cells. '
+             'Save the export as <code>data/fetch_gold_gap.jsonl</code> and '
+             're-run judging: a human verdict has the highest priority, '
+             'overrides the panel, and is reused by every later round.</p>'
              % (len(gaps), len(provs), total_cells))
     H.append(_SCRIPT % total_cells)
     H.append("</div>")
@@ -212,7 +226,7 @@ _SCRIPT = """<script>
   document.addEventListener('click', function (ev) {
     var b = ev.target.closest('.rv-mark button');
     if (b) {
-      // 再点一次取消，方便改主意
+      // Clicking the same choice again clears it, so a reviewer can change their mind
       if (store[b.dataset.k] === b.dataset.v) { delete store[b.dataset.k]; }
       else { store[b.dataset.k] = b.dataset.v; }
       save();
@@ -242,19 +256,20 @@ _SCRIPT = """<script>
       return;
     }
     if (ev.target.id === 'rv-clear') {
-      // 两步确认，不用 confirm() —— artifact 的沙箱 iframe 可能拦掉对话框，
-      // 被拦时它返回 undefined，「取消」的分支会让清空永远失效。
+      // Two-step confirmation rather than confirm(): a sandboxed iframe can block
+      // dialogs, and a blocked confirm() returns undefined, which would make the
+      // cancel branch swallow every clear attempt.
       var btn = ev.target;
       if (btn.dataset.armed !== '1') {
         if (!Object.keys(store).length) { return; }
         btn.dataset.armed = '1';
-        btn.textContent = '再点一次确认清空';
+        btn.textContent = 'Click again to confirm';
         setTimeout(function () {
-          btn.dataset.armed = ''; btn.textContent = '清空';
+          btn.dataset.armed = ''; btn.textContent = 'Clear';
         }, 4000);
         return;
       }
-      btn.dataset.armed = ''; btn.textContent = '清空';
+      btn.dataset.armed = ''; btn.textContent = 'Clear';
       store = {}; save();
       var o = document.getElementById('rv-out');
       o.value = ''; o.classList.remove('rv-show');
@@ -275,7 +290,7 @@ def main() -> None:
     a = ap.parse_args()
     html_text = build(Path(a.pageset), Path(a.extractions), Path(a.verdicts))
     Path(a.out).write_text(html_text, encoding="utf-8")
-    print("人工核对页 -> %s（%.2f MB）" % (a.out, len(html_text.encode()) / 1e6))
+    print("review page -> %s (%.2f MB)" % (a.out, len(html_text.encode()) / 1e6))
 
 
 if __name__ == "__main__":

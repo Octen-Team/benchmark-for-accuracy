@@ -1,9 +1,12 @@
-"""13 家 fetch adapter 的字段映射与失败归因。全部 mock，不打真网络。
+"""Field mapping and failure attribution for the fetch adapters. Fully mocked; no
+network access.
 
-三条纪律在这里落地：
-  缺 key 硬失败    静默跳过会跑出"整轮零覆盖而报告显示零故障"（commit 69b778f）。
-  缓存新鲜度钉死   不钉的话延迟列量的是缓存命中率的排名（playbook 5.8）。
-  自家上限记 harness  参考报告的头条发现正是"21 条失败是我们自己的代码"。
+Three rules are enforced here:
+  A missing key fails hard.  Skipping silently yields a round with zero coverage and
+                             a report showing zero faults.
+  Cache freshness is pinned. Unpinned, the latency column ranks cache hit rates.
+  Our own caps are harness   A size cap we imposed must not be charged to the
+  faults.                    provider.
 """
 import json
 
@@ -36,7 +39,7 @@ def _keys(monkeypatch):
 
 
 def _capture(monkeypatch, resp):
-    """打桩 requests.post/get，回传被发出的请求体供断言。"""
+    """Stub requests.post/get and hand back the request that was sent, for assertions."""
     sent = {}
 
     def fake(url, **kw):
@@ -69,25 +72,25 @@ class TestFieldMapping:
         assert r.status == "ok" and r.text == "exa body"
 
 class TestLiveFetchIsForced:
-    """各家的"实时抓、不走缓存"开关必须显式设上。
+    """Every provider's live-fetch knob must be set explicitly.
 
-    不设的话量到的是**索引覆盖率**而不是**抓取能力** —— exa 的 `livecrawl` 不传时默认
-    `fallback`（先查自家索引，命中就直接返回），2026-09-01 实测 never/fallback 0.7s、
-    always 1.9s，差三倍。
+    Unset, the round measures **index coverage** rather than **fetch capability**: a
+    provider whose live-crawl parameter defaults to consulting its own index first
+    returns cached content on a hit, and is measurably faster for it.
     """
 
     def test_exa_forces_a_live_crawl(self, monkeypatch):
         sent = _capture(monkeypatch, _Resp(payload={"results": [{"text": "x"}]}))
         r = B.get_fetcher("exa").fetch("https://example.com/")
         assert sent["json"]["livecrawl"] == "always", \
-            "不传时默认 fallback，那一列量的就是索引命中率"
+            "unset it defaults to a fallback mode, and the column then measures index hits"
         assert r.cache_pinned == "pinned"
 
     def test_octen_asks_for_zero_age(self, monkeypatch):
         sent = _capture(monkeypatch, _Resp(payload={
             "data": {"results": [{"status": "success", "full_content": "x"}]}}))
         r = B.get_fetcher("octen").fetch("https://example.com/")
-        assert sent["json"]["max_age_seconds"] == 0, "留 300 就是留了 5 分钟的缓存窗口"
+        assert sent["json"]["max_age_seconds"] == 0, "any nonzero value leaves a cache window"
         assert r.cache_pinned == "pinned"
 
     def test_firecrawl_pins_maxage_zero(self, monkeypatch):
@@ -98,17 +101,18 @@ class TestLiveFetchIsForced:
 
     def test_a_provider_without_the_knob_says_so_rather_than_looking_unpinned(self,
                                                                              monkeypatch):
-        """三态而不是布尔：'这家没有这个参数' 和 '我们漏设了' 含义完全不同。
+        """Three states, not a boolean: "this API has no such parameter" and "we forgot
+        to set it" mean entirely different things.
 
-        tavily 的 /extract 官方参数表里没有缓存控制项，而且它**不校验未知参数** ——
-        猜一个名字塞进去会被静默忽略，我们却会以为缓存关掉了。
+        Some APIs do not validate unknown parameters, so a guessed name is silently
+        ignored while we believe the cache was disabled.
         """
         _capture(monkeypatch, _Resp(payload={"results": [{"raw_content": "x"}]}))
         r = B.get_fetcher("tavily").fetch("https://example.com/")
         assert r.cache_pinned == "no_knob"
 
     @pytest.mark.skipif(importlib.util.find_spec("readability") is None,
-                        reason="readability-lxml 未安装（requirements-fetch.txt 可选依赖）")
+                        reason="readability-lxml is not installed (optional dependency)")
     def test_local_libraries_send_no_cache_headers(self, monkeypatch):
         sent = _capture(monkeypatch, _Resp(text="<html><body>hi there</body></html>"))
         B.get_fetcher("readability").fetch("https://example.com/")
@@ -119,7 +123,7 @@ class TestLiveFetchIsForced:
             assert cls.cache_pinned in ("pinned", "no_knob", "unknown", "unpinned"), name
 
     def test_unwired_providers_are_unpinned_not_no_knob(self):
-        """还没接线的家不能声称"没有这个旋钮" —— 我们只是还没查。"""
+        """An unwired provider must not claim "no such knob" — we simply have not looked."""
         for n in ("context", "cloudflare", "apify"):
             assert B.FETCHERS[n].cache_pinned == "unpinned", n
 
@@ -131,19 +135,20 @@ class TestKeyDiscipline:
             B.get_fetcher("octen").fetch("https://example.com/")
 
     def test_unkeyed_providers_say_endpoint_unverified_too(self, monkeypatch):
-        """还没接线的家：缺 key 时同时说明"口径也待核"，免得以为填个 key 就能跑。"""
+        """An unwired provider says the endpoint shape is unverified alongside the missing
+        key, so nobody assumes a key alone makes it runnable."""
         monkeypatch.delenv("CONTEXT_API_KEY", raising=False)
         with pytest.raises(RuntimeError) as e:
             B.get_fetcher("context").fetch("https://example.com/")
         assert "CONTEXT_API_KEY" in str(e.value)
-        assert "待核" in str(e.value)
+        assert "unverified" in str(e.value)
 
     def test_a_wired_provider_only_complains_about_the_key(self, monkeypatch):
         monkeypatch.delenv("ZYTE_API_KEY", raising=False)
         with pytest.raises(RuntimeError) as e:
             B.get_fetcher("zyte").fetch("https://example.com/")
         assert "ZYTE_API_KEY" in str(e.value)
-        assert "待核" not in str(e.value), "口径已核实过，别再说待核"
+        assert "unverified" not in str(e.value), "this shape was verified; stop saying otherwise"
 
 
 class TestFailureClassification:
@@ -185,8 +190,8 @@ class TestFailureClassification:
             {"status": "success", "full_content": big}]}}))
         r = B.get_fetcher("octen").fetch("https://example.com/")
         assert r.failure_reason == "our_size_cap"
-        assert r.fault == "harness", "自家上限记到厂商头上就是把我们的 bug 算成它的分"
-        assert r.text, "截断也要留住已取到的文本，不能丢"
+        assert r.fault == "harness", "charging our own cap to the provider scores our bug as theirs"
+        assert r.text, "truncation must keep what was already retrieved"
 
 
 class TestLocalLibs:
@@ -213,7 +218,8 @@ class TestRoster:
             B.get_fetcher("nope")
 
     def test_runnable_today_is_declared(self):
-        """2026-09-01 实测能跑的家；卡在账户上的另列，不混进"不可用"。"""
+        """Providers that can run; those blocked on account state are listed separately
+        rather than folded into "unavailable"."""
         assert set(B.RUNNABLE_TODAY) == {
             "octen", "exa", "tavily", "trafilatura", "readability",
             "zyte", "you", "linkup", "parallel", "firecrawl", "brightdata"}
@@ -223,14 +229,15 @@ class TestRoster:
 
 class TestAccountVsCapability:
     def test_402_is_our_account_not_their_capability(self, monkeypatch):
-        """余额不足记成 provider 会让那家拿 0% 而显得很差 —— 那是把我们没充值算成它的分。"""
+        """Charging an exhausted balance to the provider scores our unpaid invoice as
+        their weakness."""
         _capture(monkeypatch, _Resp(status=402, text="Insufficient credits"))
         r = B.get_fetcher("firecrawl").fetch("https://example.com/")
         assert r.failure_reason == "other"
         assert r.fault == "harness"
 
 class TestNewlyWiredProviders:
-    """2026-09-01 接线的四家。endpoint 与参数都是**行为验证过**的，不是按印象填的。"""
+    """Adapters whose endpoint and parameters were verified by observed behaviour."""
 
     def test_zyte_uses_basic_auth_and_browser_render(self, monkeypatch):
         monkeypatch.setenv("ZYTE_API_KEY", "zk")
@@ -241,10 +248,10 @@ class TestNewlyWiredProviders:
             return _Resp(payload={"browserHtml": "<h1>Title</h1><p>body text</p>"})
         monkeypatch.setattr(requests, "post", fake)
         r = B.get_fetcher("zyte").fetch("https://example.com/")
-        assert sent["auth"] == ("zk", ""), "key 走 HTTP Basic 的用户名位，密码留空"
+        assert sent["auth"] == ("zk", ""), "key goes in the HTTP Basic username, empty password"
         assert sent["json"]["browserHtml"] is True
         assert r.status == "ok" and "body text" in r.text
-        assert "<h1>" not in r.text, "HTML 要归一化成文本，否则会被判成返回了原始载荷"
+        assert "<h1>" not in r.text, "HTML must be normalised, or it is judged a raw payload"
         assert r.raw_meta["output_form"] == "html"
 
     def test_you_uses_the_plural_urls_field(self, monkeypatch):
@@ -263,13 +270,14 @@ class TestNewlyWiredProviders:
         assert r.text == "# Hi"
 
     def test_parallel_asks_for_full_content_not_excerpts(self, monkeypatch):
-        """`objective` 模式是查询驱动的，会把"抓到了多少"混成"回答得准不准"。"""
+        """Objective mode is query-driven and conflates "how much was retrieved" with
+        "how well it answered"."""
         monkeypatch.setenv("PARALLEL_API_KEY", "pk")
         sent = _capture(monkeypatch, _Resp(payload={"results": [
             {"full_content": "the whole page", "excerpts": ["a snippet"]}]}))
         r = B.get_fetcher("parallel").fetch("https://example.com/")
         assert sent["json"]["full_content"] is True
-        assert "objective" not in sent["json"], "抓取能力评测要整页，不要按问题收窄的片段"
+        assert "objective" not in sent["json"], "fetch capability needs the whole page"
         assert r.text == "the whole page"
 
     def test_parallel_falls_back_to_excerpts_when_full_content_is_empty(self, monkeypatch):
@@ -291,17 +299,17 @@ class TestNewlyWiredProviders:
             assert n in B.RUNNABLE_TODAY, n
 
     def test_cache_state_says_unknown_when_we_could_not_verify(self):
-        """linkup 和 tavily 一样不校验未知参数 —— 猜一个名字会被静默忽略，
-        而我们会以为缓存关掉了。查不到就标 unknown，别装作钉住了。"""
+        """This API does not validate unknown parameters either: a guessed name is
+        silently ignored while we believe the cache was disabled. Report unknown."""
         assert B.FETCHERS["linkup"].cache_pinned == "unknown"
         assert B.FETCHERS["you"].cache_pinned == "unknown"
         assert B.FETCHERS["parallel"].cache_pinned == "unknown"
-        assert B.FETCHERS["zyte"].cache_pinned == "no_knob", "每次真开浏览器渲染"
+        assert B.FETCHERS["zyte"].cache_pinned == "no_knob", "renders in a real browser on every call"
 
 
 class TestBrightDataDatasetsV3:
-    """走 Datasets v3 scrape，不是 Web Unlocker 的 /request —— 两者是不同产品，
-    这个账户没有 unlocker 型 zone，那条路一直走不通。"""
+    """Uses the Datasets v3 scrape endpoint, not the Web Unlocker request endpoint —
+    different products, and an account without an unlocker zone cannot use the latter."""
 
     def test_uses_the_dataset_endpoint_and_jsonl_body(self, monkeypatch):
         monkeypatch.setenv("BRIGHTDATA_API_KEY", "bk")
@@ -322,7 +330,7 @@ class TestBrightDataDatasetsV3:
         assert B.get_fetcher("brightdata").fetch("https://example.com/").text == "first"
 
     def test_missing_dataset_id_hard_fails_rather_than_guessing(self, monkeypatch):
-        """猜一个 dataset_id 换来的是一整列 400，看起来像"这家抓不到"。"""
+        """A guessed dataset_id buys a whole column of 400s that looks like a fetch failure."""
         monkeypatch.setenv("BRIGHTDATA_API_KEY", "bk")
         monkeypatch.delenv("BRIGHTDATA_SCRAPE_DATASET", raising=False)
         with pytest.raises(RuntimeError, match="BRIGHTDATA_SCRAPE_DATASET"):
@@ -352,11 +360,12 @@ class TestRosterAfterTheNewKeys:
 
 
 class TestPolicyRefusalVsRealBlock:
-    """「我不给你抓这个域」和「目标站把我拦了」是两回事。
+    """"I will not fetch this domain for you" and "the target site blocked me" are
+    different things.
 
-    前者是政策选择、后者是能力差距，采购时含义完全不同。都塞进 anti_bot_blocked
-    会让「不做这门生意」看起来像「打不过」。2026-09-01 实测：firecrawl 全部 11 条
-    403 都是政策拒绝（"We do not support this site"），一条真实反爬失败都没有。
+    The first is a policy choice, the second a capability gap, and they mean opposite
+    things to anyone choosing a provider. Folding both into anti_bot_blocked makes
+    "we do not do this business" look like "we cannot get through".
     """
 
     def test_policy_wording_becomes_blocklisted_domain(self):
@@ -366,7 +375,7 @@ class TestPolicyRefusalVsRealBlock:
 
     def test_a_real_block_stays_anti_bot(self):
         assert B.classify_body(403, "Access denied. Cloudflare Ray ID: abc") is None, \
-            "没明说原因就交给状态码兜底"
+            "with no stated reason, the status code decides"
         assert B.classify_body(403, "") is None
 
     def test_403_is_split_at_the_http_classifier(self, monkeypatch):

@@ -1,15 +1,18 @@
-"""机械层：纯函数检查。无网络、无 key、无 LLM，所以全部可单测。
+"""Mechanical layer: pure functions. No network, no keys, no LLM, so all unit-testable.
 
-**本轮只评抓取能力，不评解析质量。** 正文纯度（noise_ratio）、结构保真
-（structure_score）、截断完整度（tail_hit）三项已删除 —— 留着不评的指标躺在
-代码和报告里，读的人会以为它们进了评价。
+**Fetch capability only — parsing quality is out of scope.** Text purity, structural
+fidelity and truncation completeness were removed. An unscored metric left sitting in
+the code and the report reads as though it counts.
 
-**分母为空一律 None，绝不 0.0** —— 空集合上的比值会伪装成"全部达标"或"全部不达标"，
-design 那轮的 8eb095e 就是栽在这儿。调用方拿到 None 的含义是"这一项在这页上无定义"，
-报告里写"未标注"而不是 0%。
+**An empty denominator returns None, never 0.0.** A ratio over an empty set disguises
+itself as "everything passed" or "everything failed"; either way the reader is misled.
+None means "undefined for this page", and the report prints it as unlabelled rather
+than 0%.
 
-`wall_hit` 是唯一一个**不参与判定**的检查：参考报告把 "cloudflare" 这个词当拦截证据，
-于是 Cloudflare 官方文档被判成墙页。墙的判定归 GT 的 shape 标签（视觉判的）与面板。
+`wall_hit` is the one check that **does not feed the verdict**. Treating the mere
+presence of a vendor name like "cloudflare" as evidence of blocking judges that
+vendor's own documentation as a wall. Wall detection belongs to the ground truth and
+the judging panel.
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ from .fetch_spec import TH
 
 _WORD = re.compile("[0-9a-z\u00c0-\u024f]+")
 _CJK = re.compile("[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
-# 乱码特征：latin-1 误读 UTF-8 的残渣 —— 前导字节落在 C2-EF，续字节落在 C1 区
+# Mojibake signature: UTF-8 misread as latin-1 — lead byte in C2-EF, continuation in C1
 _MOJIBAKE = re.compile("[\u00c2-\u00ef][\u0080-\u00bf]")
 _REPLACEMENT = "\ufffd"
 
@@ -35,7 +38,7 @@ _WALL_PATTERNS = {
 
 
 def tokenize(text: str) -> list[str]:
-    """小写、去标点。CJK 逐字成 token，其余按词切。"""
+    """Lowercase, strip punctuation. CJK is tokenised per character, the rest per word."""
     if not text:
         return []
     t = unicodedata.normalize("NFKC", text).lower()
@@ -50,10 +53,11 @@ def tokenize(text: str) -> list[str]:
 
 
 def len_norm(text: str) -> int:
-    """CJK 按字符 + 其余按空白分词。
+    """CJK counted per character, everything else per whitespace-delimited word.
 
-    `len(text.split())` 对日文是废的（整句算一个词），而集合里 aozora / rakuten / qiita
-    三条是日文。跨家长度只作参考、不排名（playbook 9.6）。
+    `len(text.split())` is useless for Japanese — a whole sentence counts as one word —
+    and the page set contains Japanese pages. Length is a reference figure only and is
+    never ranked across providers.
     """
     if not text:
         return 0
@@ -68,31 +72,36 @@ def _ratio(text: str, terms: list[str] | None) -> float | None:
 
 
 def coverage(text: str, vocab: list[str] | None) -> float | None:
-    """召回：GT 内容词表被取到了多少。基线型的主指标之一。"""
+    """Recall: how much of the ground-truth content vocabulary came back."""
     return _ratio(text, vocab)
 
 
 def render_hit(text: str, anchors: list[str] | None) -> float | None:
-    """「仅渲染后可见」锚点的命中率 —— SPA 页的成功闸门。
+    """Hit rate over anchors that only appear **after rendering** — the success gate
+    for SPA pages.
 
-    这仍然是**抓取能力**而不是解析质量：拿到服务端骨架 HTML 的家 coverage 可能不低
-    （nav 里就有商品名），但 JS 执行后才出现的价格 / 库存 / 列表项一个都没有 ——
-    它没有把这一页抓下来，只抓到了一个壳。
+    This still measures fetch capability, not parsing quality: a provider that returns
+    the server-side shell can score respectable coverage (the nav alone carries product
+    names) while none of the prices, stock counts or list items that JavaScript produces
+    are present. It did not retrieve the page, only its shell.
     """
     return _ratio(text, anchors)
 
 
 def identity_ok(text: str, anchors: list[str] | None) -> bool | None:
-    """返回的是不是这条 URL 的内容。独有锚点命中过半即认为是。
+    """Is this the content of *this* URL? More than half the distinctive anchors must hit.
 
-    抓退回父页/索引页/搜索结果页的静默失败 —— 它比失败更坏，下游发现不了。
+    Catches the silent failure where a provider falls back to the parent page, an index,
+    or a search-results page. That is worse than an outright failure, because nothing
+    downstream can tell.
     """
     r = _ratio(text, anchors)
     return None if r is None else r >= 0.5
 
 
 def encoding_ok(text: str) -> bool:
-    """自足检查：只看文本自身，不需要 GT，所以弱 GT 的反爬页也能判（设计文档 1.3）。"""
+    """Self-contained: inspects the text alone and needs no ground truth, so it still
+    applies on defended pages where ground truth is weak or missing."""
     if not text:
         return True
     if text.count(_REPLACEMENT) >= 3:
@@ -101,6 +110,7 @@ def encoding_ok(text: str) -> bool:
 
 
 def wall_hit(text: str) -> list[str]:
-    """**只作证据字段记录，不参与判定。** 墙的判定归 GT 的 shape 标签与面板。"""
+    """**Recorded as evidence only; never feeds the verdict.** Wall detection belongs
+    to the ground truth and the panel."""
     low = (text or "").lower()[:20000]
     return sorted(n for n, pat in _WALL_PATTERNS.items() if re.search(pat, low))

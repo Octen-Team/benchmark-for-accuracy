@@ -1,6 +1,8 @@
-"""抓取成败判定 + 面板。**本轮只评抓取能力** —— 主口径只回答"这一页抓到了没有"。
+"""Fetch-success judging and the panel. Fetch capability only — the headline metric
+answers whether the page was retrieved.
 
-判定是这条流水线里最贵也最容易错的一步，测试要厚。
+Judging is the most expensive and most error-prone step in the pipeline, so the
+tests here are deliberately thorough.
 """
 from src import fetch_score as S
 from src.fetch_spec import TH
@@ -20,7 +22,8 @@ def page(**kw):
 
 
 def antibot_page(subclass="waf", **kw):
-    """反爬页在真实数据里是**弱 GT**：只有 shape 标签，没有词表也没有锚点。"""
+    """Anti-bot pages have **weak ground truth** in real data: no vocabulary and no
+    anchors."""
     return page(type="antibot", antibot_subclass=subclass,
                 gt={"vocab": [], "boiler_terms": [], "anchors": [],
                     "render_anchors": [], "shape": "bot_wall"}, **kw)
@@ -38,19 +41,20 @@ def verdict(p, r):
 
 class TestScopeIsFetchOnly:
     def test_parsing_quality_checks_are_gone(self):
-        """留着不评的指标躺在代码里，读的人会以为它们进了评价。"""
+        """An unscored metric left in the code reads as though it counts."""
         ch = S.run_checks(page(), resp())
         for dead in ("noise_ratio", "structure_score", "tail_hit"):
-            assert dead not in ch, "%s 还在 run_checks 的输出里" % dead
+            assert dead not in ch, "%s is still in the run_checks output" % dead
 
     def test_a_messy_but_complete_fetch_still_passes(self):
-        """正文里混进导航词不再扣分 —— 那是解析质量，本轮不评。"""
+        """Navigation words mixed into the body no longer cost anything: that is parsing
+        quality, which is out of scope."""
         dirty = "home about careers alpha beta gamma delta epsilon"
         v, _ = verdict(page(), resp(dirty))
         assert v["verdict"] == "pass"
 
     def test_a_partial_fetch_of_a_long_page_still_passes(self):
-        """拿到 5 个词里的 2 个（0.4 > 0.3 闸门）算抓到了 —— 本轮不评完整度。"""
+        """Two of five terms clears the gate — completeness is not scored here."""
         v, ch = verdict(page(), resp("alpha beta"))
         assert ch["coverage"] == 0.4
         assert v["verdict"] == "pass"
@@ -58,7 +62,7 @@ class TestScopeIsFetchOnly:
 
 class TestHardVetoes:
     def test_wrong_page_is_lost(self):
-        """退回父页在覆盖率口径下能蒙过去 —— 同一性是专门抓它的。"""
+        """A fallback to the parent page slips past a coverage gate; identity catches it."""
         for typ in ("baseline", "docfmt", "reliability"):
             v, _ = verdict(page(type=typ), resp("zeta eta theta iota kappa"))
             assert v["verdict"] == "lost" and v["reason"] == "wrong_page", typ
@@ -80,22 +84,22 @@ class TestContentGate:
         assert v["verdict"] == "pass" and v["reason"] == "content_present"
 
     def test_a_stub_is_lost(self):
-        p = page(gt={"anchors": []})          # 关掉同一性否决，单看闸门
+        p = page(gt={"anchors": []})          # disable the identity veto; test the gate
         v, ch = verdict(p, resp("unrelated filler words here"))
         assert ch["coverage"] == 0.0 and v["verdict"] == "lost"
 
     def test_between_the_bands_is_partial(self):
         p = page(gt={"vocab": ["a%d" % i for i in range(20)], "anchors": []})
-        v, _ = verdict(p, resp("a0 a1"))       # 2/20 = 0.10，介于 0.05 与 0.3 之间
+        v, _ = verdict(p, resp("a0 a1"))       # between the lost and pass thresholds
         assert v["verdict"] == "partial"
 
 
 class TestRenderIsFetchNotParsing:
     def test_server_shell_only_is_lost(self):
-        """SPA 只拿到服务端骨架 = 没把这一页抓下来，只抓到了一个壳。"""
+        """An SPA shell is not the page — only its shell."""
         v, ch = verdict(page(type="render"), resp("alpha beta gamma delta epsilon"))
         assert ch["coverage"] == 1.0 and ch["render_hit"] == 0.0
-        assert v["verdict"] == "lost", "coverage 高不该救 SPA"
+        assert v["verdict"] == "lost", "high coverage must not rescue an unrendered SPA"
 
     def test_render_only_content_passes(self):
         v, _ = verdict(page(type="render"), resp("alpha price stock"))
@@ -113,14 +117,15 @@ class TestAntibot:
         assert v["verdict"] == "lost"
 
     def test_anything_returned_goes_to_the_panel(self):
-        """三小类"过"的定义不同，机械层给不出。"""
+        """Passing means something different per sub-class; the mechanical layer
+        cannot decide."""
         v, _ = verdict(antibot_page("login_wall"), resp("some text"))
         assert v["verdict"] is None and v["needs_panel"] is True
 
     def test_paywall_with_a_full_article_is_flagged_not_rewarded(self):
         v, _ = verdict(antibot_page("paywall"), resp("word " * 2000))
         assert v["suspicious_bypass"] is True
-        assert v["verdict"] is None, "绕过付费墙不加分"
+        assert v["verdict"] is None, "getting past a paywall earns nothing"
 
     def test_a_wall_page_returned_as_content_is_vetoed_when_anchors_exist(self):
         p = page(type="antibot", antibot_subclass="login_wall",
@@ -131,7 +136,8 @@ class TestAntibot:
 
 class TestExpectedBehaviour:
     def test_error_page_returned_as_content_is_lost_and_dishonest(self):
-        """把 404 页面体当正文返回比失败更坏 —— 下游不知道自己拿错了。"""
+        """Returning a 404 body as content is worse than failing: nothing downstream
+        knows it got the wrong thing."""
         p = page(type="reliability", expect="error", probes=["empty_thin"])
         v, _ = verdict(p, resp("404 Not Found - the requested page does not exist"))
         assert v["verdict"] == "lost" and v["dishonest"] is True
@@ -162,7 +168,8 @@ class TestGtGap:
         assert v["verdict"] is None and v["needs_panel"] is True
 
     def test_a_walled_gt_is_not_used_for_scoring(self):
-        """w3.org 实测建出来的 GT 是 Cloudflare 验证页。拿它当参考，全场都被判"抓错页"。"""
+        """When the ground truth is itself a challenge screen, using it as the reference
+        marks every provider as having returned the wrong page."""
         p = page(gt={"gt_gap": True, "vocab": ["just", "moment"],
                      "anchors": ["just", "moment"]})
         v, ch = verdict(p, resp("The real HTML Standard content is here"))
@@ -172,15 +179,15 @@ class TestGtGap:
 
 class TestHardVetoesAreFinal:
     def test_mojibake_never_goes_to_the_panel(self, monkeypatch):
-        """实测 readability 返回 PDF 原始字节，面板只看到预览里的 `%PDF ... stream`，
-        判成"内容来了"，把确定性的 lost 推翻了。"""
+        """A parser returning raw PDF bytes shows the panel only `%PDF ... stream` in the
+        preview, which it reads as "content arrived", overturning a certain loss."""
         called = {"n": 0}
         monkeypatch.setattr(S, "panel_verdict",
                             lambda *a, **k: called.__setitem__("n", called["n"] + 1))
         out = S.score_one(page(), resp("alpha " + "\ufffd" * 9),
                           panel=["m1", "m2", "m3"])
         assert out["verdict"] == "lost" and out["reason"] == "mojibake"
-        assert called["n"] == 0, "硬否决不该送面板复判"
+        assert called["n"] == 0, "a hard veto must not be sent to the panel"
 
     def test_wrong_page_never_goes_to_the_panel(self, monkeypatch):
         called = {"n": 0}
@@ -192,7 +199,7 @@ class TestHardVetoesAreFinal:
         assert called["n"] == 0
 
     def test_band_verdicts_still_go_to_the_panel(self, monkeypatch):
-        """coverage 是粗代理，它判出来的 lost/partial 该让面板复核。"""
+        """Coverage is a coarse proxy; the lost/partial it produces deserve review."""
         monkeypatch.setattr(S, "panel_verdict", lambda *a, **k: {
             "verdict": "pass", "panel_split": False, "dishonest": False, "votes": {}})
         p = page(gt={"vocab": ["a%d" % i for i in range(20)], "anchors": []})
@@ -244,8 +251,8 @@ class TestPanel:
 
 class TestPromptAndCache:
     def test_three_rubrics_not_five(self):
-        """静态文档 / 文档文件 / 健壮性问的是同一个问题（内容来了没有），
-        没必要各写一份 —— 分岔多一份就多一处会漂移的措辞。"""
+        """Static docs, document files and robustness ask the same question (did the
+        content arrive), so one rubric each would only add wording that can drift."""
         assert set(S._TYPE_RUBRIC) == {"content", "render", "antibot"}
         for t in ("baseline", "docfmt", "reliability"):
             assert S.rubric_key(t) == "content"
@@ -259,7 +266,7 @@ class TestPromptAndCache:
             assert "FETCH CAPABILITY" in sysmsg
 
     def test_every_rubric_rejects_raw_payload_as_content(self):
-        """调用方要的是页面，不是文件的字节。"""
+        """The caller wants the page, not the bytes of a file."""
         for t in ("baseline", "render", "antibot"):
             assert "%PDF" in S.panel_system(t)
             assert "is NOT content" in S.panel_system(t)
@@ -277,7 +284,7 @@ class TestPromptAndCache:
         p = page(gt={"gt_gap": True, "vocab": ["just", "moment"], "title": "Just a moment"})
         u = S.panel_user(p, resp("real content"), {})
         assert "NO reference" in u
-        assert "just, moment" not in u, "被拦时抓到的验证页词表绝不能当参考喂给面板"
+        assert "just, moment" not in u, "challenge-screen vocabulary must never reach the panel"
 
     def test_cache_key_changes_with_text_rubric_and_prompt(self, monkeypatch):
         k = lambda txt, user: S.judge_cache_key({"pid": "p1"},
@@ -295,7 +302,8 @@ class TestPromptAndCache:
 
 
 class TestWeakAnchors:
-    """GT 缺口页从中立 SERP 补来的弱锚点：身份能判，完整度判不了。"""
+    """Weak anchors from a neutral SERP on gap pages: identity is decidable,
+    completeness is not."""
 
     def _weak(self, **gt):
         base = {"gt_gap": True, "anchor_source": "serp",
@@ -308,7 +316,7 @@ class TestWeakAnchors:
         p = self._weak()
         ch = S.run_checks(p, resp("Taylor Swift eras tour tickets on sale"))
         assert ch["identity_ok"] is True
-        assert ch["coverage"] is None, "被拦时抓到的验证页文案不能当内容参考"
+        assert ch["coverage"] is None, "challenge-screen copy is not a content reference"
 
     def test_a_different_page_fails_identity(self):
         p = self._weak()
@@ -316,12 +324,13 @@ class TestWeakAnchors:
         assert ch["identity_ok"] is False
 
     def test_weak_identity_failure_is_not_final(self):
-        """搜索引擎的标题可能过时，弱证据不该产生不可申诉的判定。"""
+        """A search engine title can be stale; weak evidence must not produce a verdict
+        with no appeal."""
         p = self._weak()
         v, _ = verdict(p, resp("SeatGeek home page browse concerts sports"))
         assert v["verdict"] == "lost" and v["reason"] == "wrong_page_weak"
         assert v["final"] is False and v["needs_panel"] is True
-        assert v["dishonest"] is False, "弱证据不足以扣 dishonest"
+        assert v["dishonest"] is False, "weak evidence is not enough to charge dishonesty"
 
     def test_strong_identity_failure_stays_final(self):
         v, _ = verdict(page(), resp("zeta eta theta iota kappa"))
@@ -347,7 +356,8 @@ class TestCrossPanel:
                            "text": ""}}
 
     def test_provider_names_never_reach_the_model(self):
-        """品牌先验会漏进判定，而这些页恰恰最需要它只看内容。"""
+        """Brand priors would leak into the verdict, and these are exactly the pages
+        where only the content should count."""
         u, lab = S.cross_user(page(), self._resps())
         assert not any(n in u for n in ("octen", "exa", "tavily"))
         assert set(lab.values()) == {"octen", "exa", "tavily"}
@@ -364,7 +374,8 @@ class TestCrossPanel:
         assert "The Real Title" in u and "a snippet" in u
 
     def test_rubric_defaults_to_lost(self):
-        """裸判偏松，所以提问方式要求"没有正面证据就判失败"。"""
+        """Judging without a reference is lenient, so the prompt demands a failure
+        verdict in the absence of positive evidence."""
         assert "Default to `lost`" in S.CROSS_SYSTEM
         assert "Length is not evidence" in S.CROSS_SYSTEM
 

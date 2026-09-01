@@ -1,9 +1,10 @@
-"""凭据来源检查：`.env` 与 shell 环境不一致时必须喊出来。
+"""Credential-source check: a mismatch between `.env` and the shell must be reported.
 
-`_load_dotenv` 用 `os.environ.setdefault`，**不覆盖已存在的变量** —— shell 里残留的
-旧 key 会静默压过 .env 里的新 key，两边看起来都"设好了"。2026-09-01 实测踩到：
-新的 firecrawl key 写进了 .env，跑出来一直是 402，因为 shell 里有个旧 key 一直生效，
-新 key 一次都没被用过，还据此写了"该家欠费"的结论。
+`_load_dotenv` uses `os.environ.setdefault` and therefore **does not override variables
+that already exist**. A stale key left in the shell silently wins over the new one in
+.env, while both look correctly configured. The failure mode is expensive: an entire
+round runs against the wrong credential, every cell fails on authorisation, and the
+results invite a conclusion about the provider that is actually about our own shell.
 """
 import pytest
 
@@ -25,7 +26,7 @@ def test_divergence_is_detected(envfile, monkeypatch):
     d = B.env_divergence(["octen"])
     assert "OCTEN_API_KEY" in d
     a, b = d["OCTEN_API_KEY"]
-    assert "…" in a and "…" in b, "只报掩码，凭据不进日志"
+    assert "…" in a and "…" in b, "only masked values are reported; secrets never logged"
 
 
 def test_matching_values_are_not_flagged(envfile, monkeypatch):
@@ -50,7 +51,7 @@ def test_only_the_selected_providers_keys_are_checked(envfile, monkeypatch):
 
 
 def test_the_runner_refuses_to_start_on_a_shadowed_key(tmp_path, monkeypatch):
-    """静默用错 key 会让整轮结论作废 —— 起跑前就该拦住。"""
+    """Silently using the wrong key invalidates the whole round; stop before starting."""
     monkeypatch.setattr(R, "env_divergence",
                         lambda provs: {"OCTEN_API_KEY": ("aaa…bbb", "ccc…ddd")})
     ps = tmp_path / "p.jsonl"
@@ -60,8 +61,8 @@ def test_the_runner_refuses_to_start_on_a_shadowed_key(tmp_path, monkeypatch):
         R.run(ps, ["octen"], tmp_path / "out")
     msg = str(e.value)
     assert "OCTEN_API_KEY" in msg
-    assert "shell" in msg and "生效" in msg
-    assert "--allow-env-override" in msg, "要告诉人怎么明确接受"
+    assert "shell" in msg and "in effect" in msg
+    assert "--allow-env-override" in msg, "must say how to accept the value explicitly"
 
 
 def test_the_override_flag_lets_it_through(tmp_path, monkeypatch):

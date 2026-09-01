@@ -1,11 +1,13 @@
-"""Fetch 实跑 runner。逐条落盘、可恢复、按家节流。
+"""The fetch round: one row per cell, resumable, with per-provider pacing.
 
-**抓取不套用检索那套重试**：检索的重试条件里有「结果不满 k 要重试」，
-是给 `search(query, k)` 的；fetch 没有 k 的概念。这里只在传输层异常 / 429 / 5xx 上重试，
-**HTTP 200 但内容为空不重试** —— 那是被测方的真实行为，重试等于把「取不到」洗成「取到了」。
+**Search-style retry rules do not apply here.** A search runner retries when fewer than
+k results come back; fetch has no k. This retries only on transport errors, 429 and 5xx.
+**An HTTP 200 with an empty body is never retried** — that is the real behaviour of the
+system under test, and retrying it would launder "could not retrieve" into "retrieved".
 
-抖动模式（`--repeat`）的键是 `(pid, provider, run_seq)`，不是 `(pid, provider)`，
-否则续跑会把第二次重复跑当成「已完成」跳掉。
+In repeat mode (`--repeat`) the resume key is `(pid, provider, run_seq)`, not
+`(pid, provider)`; otherwise a resumed run treats the second round as already done and
+skips it.
 """
 from __future__ import annotations
 
@@ -26,14 +28,16 @@ _LAST_CALL: dict[str, float] = {}
 
 
 def load_jsonl(path: Path) -> list[dict]:
-    # **按 "\n" 切，不能用 splitlines()**：后者还会在 U+2028 / U+2029 / U+0085 上切，
-    # 而那些字符在网页正文里合法出现、json.dumps 也不转义 —— 一条完整记录会被从
-    # 中间劈开，报出一个看不懂的 "Unterminated string"。实测 500 条抓取里就有。
+    # **Split on "\n" only — never splitlines().** The latter also splits on U+2028,
+    # U+2029 and U+0085, which occur legitimately in page text and which json.dumps does
+    # not escape. One complete record then gets torn in half and surfaces as a baffling
+    # "Unterminated string". Real page text does contain these.
     return [json.loads(l) for l in path.read_text(encoding="utf-8").split("\n") if l.strip()]
 
 
 def done_keys(path: Path) -> set[tuple[str, str, int]]:
-    """已完成的 (pid, provider, run_seq)。坏行跳过而不是让整轮起不来。"""
+    """Completed (pid, provider, run_seq) keys. A corrupt line is skipped rather than
+    preventing the whole round from starting."""
     if not path.exists():
         return set()
     out = set()
@@ -47,7 +51,8 @@ def done_keys(path: Path) -> set[tuple[str, str, int]]:
 
 
 def _pace(provider: str, seconds: float) -> None:
-    """按家节流。octen 在 2.5s/请求下仍会拒 —— 参考报告实测过。"""
+    """Per-provider pacing. Several providers reject requests above a certain rate; an
+    unpaced round measures their rate limits instead of their fetch capability."""
     if seconds <= 0:
         return
     lock = _PACE_LOCKS.setdefault(provider, Lock())
@@ -60,14 +65,15 @@ def _pace(provider: str, seconds: float) -> None:
 
 def fetch_once(page: dict, provider: str, *, timeout: int, pace: float,
                attempts: int = 3) -> dict:
-    """一格。重试只针对**传输层与限速**，内容为空不重试。"""
+    """One cell. Retries cover transport and rate limiting only, never an empty body."""
     last = None
     for i in range(attempts):
         _pace(provider, pace)
         try:
             resp = get_fetcher(provider).fetch(page["url"], timeout=timeout)
         except Exception as e:                   # noqa: BLE001
-            # adapter 自己抛（缺 key / 缺配置）——记一行 harness 故障，整轮继续
+            # The adapter itself raised (missing key or config): record a harness fault
+            # and keep the round going.
             return {"pid": page["pid"], "url": page["url"], "provider": provider,
                     "status": "error", "text": "", "len_norm": 0, "latency_ms": 0.0,
                     "http_status": None, "error": "%s: %s" % (type(e).__name__, str(e)[:200]),
@@ -95,22 +101,24 @@ def run(pageset_path: str | Path, providers: list[str], out_dir: str | Path, *,
     done = done_keys(out)
     pace = pace or {}
 
-    # **起跑前验一次凭据来源**（playbook §5.6：隐式开关会静默失效）。
-    # `_load_dotenv` 不覆盖已存在的环境变量，shell 里残留的旧 key 会压过 .env 里的新 key，
-    # 而两边看起来都"设好了"—— 实测因此白跑过一整轮 firecrawl。
+    # **Verify where the credentials come from before starting.** `_load_dotenv` does
+    # not override variables that already exist, so a stale key left in the shell
+    # silently wins over the new one in .env while both look correctly configured. That
+    # failure mode costs a whole round and is invisible from the results.
     div = env_divergence(providers)
     if div and not allow_env_override:
         raise RuntimeError(
-            "以下凭据 .env 与 shell 环境不一致，**实际生效的是 shell 那个**：\n"
-            + "\n".join("  %s: .env=%s  shell=%s（生效）" % (k, a, b)
+            "These credentials differ between .env and the shell environment. "
+            "**The shell value is the one in effect:**\n"
+            + "\n".join("  %s: .env=%s  shell=%s (in effect)" % (k, a, b)
                          for k, (a, b) in sorted(div.items()))
-            + "\n先决定用哪一把（`unset` 掉 shell 里的，或改 .env），"
-              "或加 --allow-env-override 明确接受 shell 的值。")
+            + "\nDecide which one you mean (unset the shell variable, or update .env), "
+              "or pass --allow-env-override to accept the shell value explicitly.")
 
     jobs = [(p, prov, seq) for seq in range(repeat) for p in pages for prov in providers
             if (p["pid"], prov, seq) not in done]
     total = len(jobs)
-    print("目标 %d 格（%d 页 x %d 家 x %d 轮），已完成 %d，待跑 %d"
+    print("target %d cells (%d pages x %d providers x %d rounds), %d done, %d to run"
           % (len(pages) * len(providers) * repeat, len(pages), len(providers), repeat,
              len(pages) * len(providers) * repeat - total, total))
 
@@ -133,6 +141,15 @@ def run(pageset_path: str | Path, providers: list[str], out_dir: str | Path, *,
             n += 1
             if (s := progress(n, total, t0)):
                 print(s)
+
+    # Persist the run parameters. The report layer needs them to state **which providers
+    # were paced** — a paced provider's latency includes deliberate waiting and is not
+    # comparable across providers. Hard-coding that sentence into the report template
+    # makes it lie for any other set of providers.
+    (out_dir / "run_meta.json").write_text(
+        json.dumps({"providers": sorted(providers), "pace": pace, "repeat": repeat,
+                    "concurrency": concurrency, "timeout": timeout},
+                   ensure_ascii=False, indent=1), encoding="utf-8")
     return out
 
 
@@ -152,17 +169,19 @@ def main() -> None:
     ap.add_argument("--providers", nargs="+", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--limit", type=int)
-    ap.add_argument("--repeat", type=int, default=1, help="抖动模式：同一格跑几次")
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="run each cell this many times, to measure round-to-round variance")
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--timeout", type=int, default=60)
     ap.add_argument("--allow-env-override", action="store_true",
-                    help="明确接受 shell 环境里的凭据压过 .env")
-    ap.add_argument("--pace", help='按家节流，如 "octen=2.5,firecrawl=6.5"（秒/请求）')
+                    help="explicitly accept shell credentials overriding .env")
+    ap.add_argument("--pace",
+                    help='per-provider pacing, e.g. "a=2.5,b=6.5" (seconds per request)')
     a = ap.parse_args()
     out = run(a.pageset, a.providers, a.out, limit=a.limit, repeat=a.repeat,
               concurrency=a.concurrency, timeout=a.timeout, pace=_parse_pace(a.pace),
               allow_env_override=a.allow_env_override)
-    print("写出 -> %s" % out)
+    print("wrote -> %s" % out)
 
 
 if __name__ == "__main__":

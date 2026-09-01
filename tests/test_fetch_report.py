@@ -1,6 +1,9 @@
-"""报告聚合。**本轮只评抓取能力** —— 主口径是单一的抓取成功率，所以总分成立。
+"""Report aggregation. Fetch capability only — one headline metric, the fetch success
+rate, on a single unit, so a total is meaningful.
 
-重点在"不撒谎"的几条：判不了的不当 0 分、缺档写未标注、缺口页的判定单独报。
+The emphasis is on the places the report must not lie: an unjudged cell is never
+scored as zero, a missing bucket prints as unlabelled, and verdicts on gap pages
+are reported separately.
 """
 from scripts import fetch_report as R
 
@@ -29,7 +32,7 @@ class TestWeighted:
 
     def test_unjudged_is_counted_separately_not_as_zero(self):
         w = R.weighted(["pass", None, None])
-        assert w["weighted"] == 1.0, "判不了的不该拉低分母"
+        assert w["weighted"] == 1.0, "an unjudged cell must not enter the denominator"
         assert w["unjudged"] == 2 and w["n"] == 1
 
     def test_all_unjudged_is_none_not_zero(self):
@@ -39,7 +42,7 @@ class TestWeighted:
 
 class TestSingleMetric:
     def test_there_is_one_overall_score_now(self):
-        """只剩一个单位，跨型可比 —— 总分成立，不再是"各型分列不合成"。"""
+        """A single unit is comparable across page types, so a total is meaningful."""
         agg = R.aggregate([verd("p1", "a", "pass"), verd("p2", "a", "lost", typ="antibot")],
                           [page("p1"), page("p2", "antibot")])
         assert agg["overall"]["a"]["weighted"] == 0.5
@@ -58,23 +61,25 @@ class TestSingleMetric:
         assert agg["overall"]["b"]["weighted"] is None
 
     def test_parsing_quality_columns_are_gone(self):
-        """留着不评的列，读的人会以为它进了评价。"""
+        """An unscored column left in place reads as though it counts."""
         agg = R.aggregate([verd("p1", "a", "pass")], [page("p1")])
         d = agg["diagnostics"]["a"]
         for dead in ("noise_median", "structure_median"):
             assert dead not in d
-        # 方法学声明里**故意**写"不评…结构保真"，那是在告诉读者它被排除了；
-        # 断言要针对表头列，不是全文。
         md = R.render_markdown(agg)
-        header = next(l for l in md.splitlines() if l.startswith("| provider | P50"))
-        assert "噪声率" not in header and "结构保真" not in header
-        assert "不评正文纯度、结构保真" in md, "排除了什么要明说"
+        # The methodology notes **deliberately** say "structural fidelity ... removed",
+        # which tells the reader it was excluded; assert against the header row, not
+        # the whole document.
+        header = [l for l in md.split("\n") if l.startswith("| provider")][0]
+        assert "noise" not in header and "structural" not in header
+        assert "structural fidelity" in md, "say what was excluded"
 
 
 class TestSliceConfidence:
     def test_a_bucket_of_gt_gap_pages_is_marked_low_confidence(self):
-        """实测「硬」档 100% 的格都在缺口页上，面板凭抓取内容自己判、偏松，
-        于是出现「硬档 88% > 软档 60%」的倒挂 —— 那是置信度假象，不是能力差异。"""
+        """On the hardest pages every cell sits on a gap page, the panel rules from the
+        fetched content alone and is lenient, and the harder tier scores above the
+        easier one. That is a confidence artefact, not a capability difference."""
         pages = [page("p1", "antibot", gt={"gt_gap": True}),
                  page("p2", "antibot", gt={"gt_gap": False})]
         vs = [verd("p1", "a", "pass", typ="antibot", strength="hard"),
@@ -83,12 +88,11 @@ class TestSliceConfidence:
         assert agg["slices"]["strength"]["hard"]["_gap_share"] == 1.0
         assert agg["slices"]["strength"]["soft"]["_gap_share"] == 0.0
         md = R.render_markdown(agg)
-        assert "低置信" in md and "不要把这些格子的高分读成能力更强" in md
+        assert "Low confidence" in md and "greater capability" in md
 
-    def test_a_clean_bucket_is_not_marked(self):
+    def test_a_clean_bucket_carries_no_warning(self):
         agg = R.aggregate([verd("p1", "a", "pass")], [page("p1", gt={"gt_gap": False})])
-        assert agg["slices"]["type"]["baseline"]["_gap_share"] == 0.0
-        assert "低置信" not in R.render_markdown(agg)
+        assert "Low confidence" not in R.render_markdown(agg)
 
     def test_slice_headers_count_pages_not_cells(self):
         pages = [page("p1"), page("p2")]
@@ -96,7 +100,7 @@ class TestSliceConfidence:
               verd("p2", "a", "pass"), verd("p2", "b", "pass")]
         agg = R.aggregate(vs, pages)
         assert agg["slices"]["type"]["baseline"]["_n_pages"] == 2
-        assert "静态文档(2)" in R.render_markdown(agg)
+        assert "static docs(2)" in R.render_markdown(agg)
 
 
 class TestSlices:
@@ -105,7 +109,7 @@ class TestSlices:
         vs = [verd("p1", "a", "pass", strength="soft"),
               verd("p2", "a", "lost", typ="antibot", strength="hard")]
         agg = R.aggregate(vs, pages)
-        assert set(agg["slices"]["strength"]) == {"hard"}, "非反爬页不该进强度切片"
+        assert set(agg["slices"]["strength"]) == {"hard"}, "non-anti-bot pages must not enter"
 
     def test_probe_slice_expands_multi_valued_labels(self):
         pages = [page("p1", probes=["oversize", "raw_direct"]),
@@ -139,10 +143,43 @@ class TestHonesty:
         assert agg["harness_faults"]["a"] == 1
         assert "our_size_cap/harness" in agg["failures"]["a"]
 
-    def test_repeat_runs_do_not_enter_the_main_score(self):
+    def test_multiple_rounds_collapse_to_one_cell(self):
         agg = R.aggregate([verd("p1", "a", "pass"), verd("p1", "a", "lost", run_seq=1)],
                           [page("p1")])
-        assert agg["overall"]["a"]["weighted"] == 1.0 and agg["meta"]["n_cells"] == 1
+        assert agg["meta"]["n_cells"] == 1, "several rounds must not count as several cells"
+        assert agg["meta"]["rounds"] == 2
+
+    def test_main_score_is_the_median_round_not_the_first(self):
+        """The first round is arbitrary; using it writes one roll of the dice in."""
+        vs = [verd("p1", "a", "pass"), verd("p1", "a", "lost", run_seq=1),
+              verd("p1", "a", "lost", run_seq=2)]
+        assert R.aggregate(vs, [page("p1")])["overall"]["a"]["weighted"] == 0.0
+
+    def test_even_round_count_takes_the_lower_middle(self):
+        """With an even number of rounds, understate rather than inflate."""
+        vs = [verd("p1", "a", "pass"), verd("p1", "a", "lost", run_seq=1)]
+        assert R.aggregate(vs, [page("p1")])["overall"]["a"]["weighted"] == 0.0
+
+    def test_envelope_reports_worst_and_best_rounds(self):
+        vs = [verd("p1", "a", "pass"), verd("p1", "a", "lost", run_seq=1),
+              verd("p1", "a", "pass", run_seq=2)]
+        env = R.aggregate(vs, [page("p1")])["meta"]["envelope"]["a"]
+        assert (env["worst"], env["median"], env["best"]) == (0.0, 1.0, 1.0)
+
+    def test_unstable_cells_are_counted(self):
+        vs = [verd("p1", "a", "pass"), verd("p1", "a", "lost", run_seq=1),
+              verd("p2", "a", "pass"), verd("p2", "a", "pass", run_seq=1)]
+        agg = R.aggregate(vs, [page("p1"), page("p2")])
+        assert agg["meta"]["unstable_cells"] == 1
+
+    def test_representative_row_comes_from_a_round_with_that_verdict(self):
+        """Diagnostic columns must come from the same round as the verdict, or the
+        report shows another round's latency."""
+        rows = R.collapse_rounds([verd("p1", "a", "lost"),
+                                  verd("p1", "a", "pass", run_seq=1),
+                                  verd("p1", "a", "pass", run_seq=2)])
+        assert len(rows) == 1
+        assert rows[0]["verdict"] == "pass" and rows[0]["run_seq"] == 1
 
     def test_gt_gaps_are_listed_and_their_verdicts_counted(self):
         pages = [page("p1", gt={"gt_gap": True}), page("p2", gt={"gt_gap": False})]
@@ -150,7 +187,7 @@ class TestHonesty:
         assert agg["meta"]["gt_gaps"][0]["pid"] == "p1"
         assert agg["meta"]["verdicts_on_gt_gap_pages"] == 1
         md = R.render_markdown(agg)
-        assert "GT 缺口" in md and "证据强度低于" in md
+        assert "ground-truth gap" in md and "evidence is weaker" in md
 
 class TestMarkdown:
     def test_column_counts_are_consistent(self):
@@ -159,13 +196,13 @@ class TestMarkdown:
             rows = [l for l in block.splitlines() if l.startswith("|")]
             if len(rows) < 3:
                 continue
-            assert len({r.count("|") for r in rows}) == 1, "表格列数不一致"
+            assert len({r.count("|") for r in rows}) == 1, "table column count differs"
 
     def test_scope_is_stated_up_front(self):
         agg = R.aggregate([verd("p1", "a", "pass")], [page("p1")])
         md = R.render_markdown(agg)
-        assert "只评抓取能力" in md
-        assert "解析质量" in md
+        assert "Fetch capability only" in md
+        assert "parsing quality" in md
 
 
 class TestHtml:
@@ -185,7 +222,7 @@ class TestHtml:
         import pytest as _p
         bad = ("<table><thead><tr><th>a</th><th>b</th></tr></thead>"
                "<tbody><tr><td>1</td></tr></tbody></table>")
-        with _p.raises(AssertionError, match="列数不一致"):
+        with _p.raises(AssertionError, match="column mismatch"):
             R._assert_table_columns(bad)
 
     def test_theme_tokens_for_light_dark_and_toggle(self):
@@ -199,14 +236,14 @@ class TestHtml:
         html = R.render_html(self._agg())
         for c in set(re.findall(r'class="([^"]+)"', html)):
             for one in c.split():
-                assert one.startswith("fx-"), "未加前缀的类名: %s" % one
+                assert one.startswith("fx-"), "unprefixed class name: %s" % one
 
     def test_scope_badge_present(self):
-        assert "只评抓取能力" in R.render_html(self._agg())
+        assert "Fetch capability only" in R.render_html(self._agg())
 
 
 class TestGlossaryTravelsWithTheReport:
-    """口径说明和报告放在一起 —— 产品不用开第二个页面。"""
+    """The definitions ship with the report so nobody needs a second document."""
 
     def _agg(self):
         pages = [page("p1"), page("p2", "antibot", gt={"gt_gap": True})]
@@ -216,18 +253,20 @@ class TestGlossaryTravelsWithTheReport:
 
     def test_markdown_has_the_glossary_section(self):
         md = R.render_markdown(self._agg())
-        assert "## 口径速查" in md
-        for h in ("主表各列", "判定怎么做出来的", "诊断列", "失败归因的责任方",
-                  "别读错的几个地方"):
+        assert "## Metric definitions" in md
+        for h in ("Main table columns", "How a verdict is reached",
+                  "Diagnostic columns", "Who a failure is attributed to",
+                  "Easy things to misread"):
             assert h in md, h
 
     def test_html_has_the_glossary_section(self):
         h = R.render_html(self._agg())
-        assert "口径速查" in h
-        assert "别读错的几个地方" in h
+        assert "Metric definitions" in h
+        assert "Easy things to misread" in h
 
     def test_glossary_explains_every_diagnostic_column(self):
-        """诊断表里出现的列，速查里都要有一条 —— 否则读者会看到一个没解释的数。"""
+        """Every column in the diagnostic table needs a definition, or the reader
+        meets an unexplained number."""
         agg = self._agg()
         md = R.render_markdown(agg)
         header = next(l for l in md.splitlines() if l.startswith("| provider | P50"))
@@ -235,45 +274,58 @@ class TestGlossaryTravelsWithTheReport:
         explained = " ".join(k for k, _ in R.DIAG_COLS)
         for c in cols:
             key = c.split()[0]
-            assert key in explained or key in md, "诊断列 %s 没有口径说明" % c
+            assert key in explained or key in md, "diagnostic column %s undefined" % c
 
     def test_markdown_bold_is_converted_in_html(self):
         h = R.render_html(self._agg())
-        assert "**" not in h, "markdown 星号漏进了 HTML"
+        assert "**" not in h, "markdown asterisks leaked into the HTML"
         assert h.count("<strong>") == h.count("</strong>")
 
     def test_low_confidence_trap_appears_only_when_relevant(self):
         with_gap = R.render_markdown(self._agg())
-        assert "带 ⚠ 的桶" in with_gap
+        assert "low-confidence" in with_gap
         clean = R.aggregate([verd("p1", "a", "pass")], [page("p1", gt={"gt_gap": False})])
-        assert "带 ⚠ 的桶" not in R.render_markdown(clean)
+        assert "low-confidence" not in R.render_markdown(clean)
 
     def test_cache_states_come_from_the_adapters_not_a_hand_copy(self):
-        """手抄一份状态表迟早和代码分叉 —— 直接从 adapter 读。"""
+        """A hand-written status table drifts from the code; read it from the adapters."""
         from src.fetch_backends import FETCHERS
         agg = R.aggregate([verd("p1", "octen", "pass")], [page("p1")])
         assert agg["meta"]["cache_pinned"]["octen"] == FETCHERS["octen"].cache_pinned
         md = R.render_markdown(agg)
-        assert "实时抓、不走缓存" in md
+        assert "live-fetch" in md
 
     def test_unknown_provider_names_do_not_break_the_state_lookup(self):
         agg = R.aggregate([verd("p1", "some-new-vendor", "pass")], [page("p1")])
         assert agg["meta"]["cache_pinned"] == {}
 
+    def test_multi_round_runs_state_the_envelope(self):
+        """A reader cannot judge whether a gap is real without the round-to-round spread."""
+        vs = [verd("p1", "a", "pass"), verd("p1", "a", "lost", run_seq=1),
+              verd("p1", "a", "pass", run_seq=2)]
+        md = R.render_markdown(R.aggregate(vs, [page("p1")]))
+        assert "3 rounds were run" in md and "0%-100%" in md
+
+    def test_single_round_runs_say_so_instead_of_staying_silent(self):
+        """Silence would let a one-round number be read as though it were stable."""
+        md = R.render_markdown(R.aggregate([verd("p1", "a", "pass")], [page("p1")]))
+        assert "Only one round was run" in md
+
     def test_freshness_blind_spot_is_always_stated(self):
-        """有的厂商从索引里给内容 —— 拿到了算成功，但可能是旧的。本轮完全没测。"""
+        """Some providers serve content from an index — retrieved, but possibly stale.
+        This evaluation does not measure that at all."""
         agg = R.aggregate([verd("p1", "a", "pass")], [page("p1")])
-        assert "不测内容新鲜度" in R.render_markdown(agg)
-        assert "不测内容新鲜度" in R.render_html(agg)
+        assert "freshness is not measured" in R.render_markdown(agg)
+        assert "freshness is not measured" in R.render_html(agg)
 
     def test_latency_trap_is_always_present(self):
-        """节流的事任何一轮都要说 —— 不说就会被横向比。"""
-        clean = R.aggregate([verd("p1", "a", "pass")], [page("p1", gt={"gt_gap": False})])
-        assert "延迟不能横向比" in R.render_markdown(clean)
+        """Pacing must be stated in any round that used it, or latency gets compared."""
+        clean = self._agg()
+        assert "not comparable across providers" in R.render_markdown(clean)
 
 
 class TestRanking:
-    """每个有方向的指标都排名；没方向的显式说明为什么不排。"""
+    """Every metric with a direction is ranked; those without say why not."""
 
     def test_ties_share_a_rank(self):
         assert R.rank_of({"a": 0.8, "b": 0.6, "c": 0.6, "d": 0.2}, True) == \
@@ -297,7 +349,7 @@ class TestRanking:
         agg = self._agg()
         assert agg["providers_ranked"] == ["a", "b"]
         md = R.render_markdown(agg)
-        # 每张表里 a 都排在 b 前面 —— 各表各排行序的话读者对不上号
+        # a precedes b in every table — per-table ordering would break cross-reading
         for block in md.split("\n\n"):
             rows = [l for l in block.splitlines() if l.startswith("| a |") or l.startswith("| b |")]
             if len(rows) == 2:
@@ -308,41 +360,43 @@ class TestRanking:
         assert "⁽1⁾" in md and "⁽2⁾" in md
 
     def test_metrics_without_a_direction_are_not_ranked(self):
-        """硬给它们排名会把「仅供参考」读成「越大越好」。"""
+        """Ranking them turns "for reference only" into "bigger is better"."""
         for f in ("len_norm_median", "panel_split", "latency_p50", "latency_p90"):
             assert R.DIAG_DIRECTION[f] is None, f
             assert f in R.NO_RANK_WHY, f
 
     def test_the_report_says_why_a_column_is_unranked(self):
         md = R.render_markdown(self._agg())
-        assert "不排名的列" in md
-        assert "长不等于好" in md
-        assert "主动节流" in md
+        assert "Columns that are not ranked" in md
+        assert "longer is not better" in md
+        assert "paced" in md
 
     def test_latency_is_not_ranked_because_we_throttled_a_provider(self):
-        """报告的陷阱条写着「延迟不能横向比」，再给它排名就是自相矛盾。"""
+        """The report warns that latency is not comparable; ranking it anyway would
+        contradict that in the same document."""
         md = R.render_markdown(self._agg())
-        assert "延迟不能横向比" in md
+        assert "not comparable across providers" in md
         assert "P50 —" in md or "P50 <span" in md or "P50 ↓" not in md
 
     def test_direction_arrows_are_in_the_header(self):
         md = R.render_markdown(self._agg())
-        assert "dishonest ↓" in md and "计入延迟 ↑" in md
+        assert "dishonest ↓" in md and "timed calls ↑" in md
 
     def test_failure_table_ranks_both_columns_ascending(self):
         md = R.render_markdown(self._agg())
-        block = md[md.index("## 为什么没抓到"):]
-        assert "失败总数" in block and "harness" in block
+        block = md[md.index("## Why it was not retrieved"):]
+        assert "failures" in block and "harness" in block
 
     def test_html_carries_the_same_ranks(self):
         h = R.render_html(self._agg())
         assert "<sup>1</sup>" in h and "<sup>2</sup>" in h
-        assert "不排名的列" in h
+        assert "not ranked" in h
 
 
 class TestReportDimensions:
-    """报告只出这六项：抓取成功率 + 五个切片。语种轴与页面难度分布已整条删除 ——
-    不评的维度留在代码和输出里，读的人会以为它进了评价。"""
+    """The report emits exactly these six: the success rate plus five slices. The
+    language axis and the page-difficulty distribution were removed entirely — an
+    unscored dimension left in the code and the output reads as though it counts."""
 
     def _agg(self):
         pages = [page("p1"), page("p2", "antibot", antibot_subclass="waf"),
@@ -368,12 +422,14 @@ class TestReportDimensions:
 
     def test_the_removed_dimensions_are_gone_from_the_rendered_report(self):
         md = R.render_markdown(self._agg())
-        for dead in ("语种", "RTL", "页面难度分布"):
+        for dead in ("language", "RTL", "difficulty distribution"):
             assert dead not in md, dead
-        assert "语种" not in R.render_html(self._agg())
+        assert "language" not in R.render_html(self._agg())
 
     def test_the_six_kept_sections_are_all_there(self):
         md = R.render_markdown(self._agg())
-        for want in ("## 主表：抓取成功率", "### 按页面类型", "### 反爬页按墙的类型",
-                     "### 反爬页按防护强度", "### 文档文件按格式", "### 健壮性探针"):
+        for want in ("## Headline: fetch success rate", "### By page type",
+                     "### Anti-bot pages by wall type",
+                     "### Anti-bot pages by protection strength",
+                     "### Document files by format", "### Robustness probes"):
             assert want in md, want

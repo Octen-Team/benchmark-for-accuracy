@@ -1,10 +1,11 @@
-"""抓取能力评测报告。
+"""The fetch-capability report.
 
-**本轮只评抓取能力**，主口径是单一的**抓取成功率**，所有页共用一个单位 ——
-所以**总分成立**，五个 type 从"各有各的主指标"降级成切片轴。
-正文纯度 / 结构保真 / 截断完整度三项属于解析质量，已从代码里删除。
+Fetch capability only: one headline metric, the **fetch success rate**, on a single unit
+shared by every page. Because of that a total is meaningful, and the five page types
+become slice axes rather than five separate headline metrics. Text purity, structural
+fidelity and truncation completeness are parsing quality and were removed from the code.
 
-**缺档一律写"未标注"，不静默归零**（playbook §7.3）。
+**A missing bucket prints as unlabelled; it is never silently zeroed.**
 """
 from __future__ import annotations
 
@@ -17,23 +18,24 @@ from pathlib import Path
 from src.fetch_spec import TH
 
 WEIGHT = {"pass": 1.0, "partial": 0.5, "lost": 0.0}
-UNLABELLED = "未标注"
-TYPE_LABEL = {"baseline": "静态文档", "render": "渲染/SPA", "docfmt": "文档文件",
-              "antibot": "反爬", "reliability": "健壮性"}
-SUBCLASS_LABEL = {"waf": "WAF", "login_wall": "登录墙", "paywall": "付费墙"}
-STRENGTH_LABEL = {"soft": "软", "medium": "中", "hard": "硬", "unknown": "未测"}
+UNLABELLED = "unlabelled"
+TYPE_LABEL = {"baseline": "static docs", "render": "render / SPA",
+              "docfmt": "document files", "antibot": "anti-bot", "reliability": "robustness"}
+SUBCLASS_LABEL = {"waf": "WAF", "login_wall": "login wall", "paywall": "paywall"}
+STRENGTH_LABEL = {"soft": "soft", "medium": "medium", "hard": "hard",
+                  "unknown": "not measured"}
 
 
 def load_jsonl(p: Path) -> list[dict]:
-    # **按 "\n" 切，不能用 splitlines()**：后者还会在 U+2028 / U+2029 / U+0085 上切，
-    # 而那些字符在网页正文里合法出现、json.dumps 也不转义 —— 一条完整记录会被从
-    # 中间劈开，报出一个看不懂的 "Unterminated string"。实测 500 条抓取里就有。
+    # **Split on "\n" only — never splitlines().** The latter also splits on U+2028,
+    # U+2029 and U+0085, which occur legitimately in page text and which json.dumps does
+    # not escape. One record gets torn in half and surfaces as "Unterminated string".
     return [json.loads(l) for l in p.read_text(encoding="utf-8").split("\n") if l.strip()]
 
 
 def weighted(verdicts) -> dict:
-    """抓取成功率 = (成功 ×1.0 + 部分 ×0.5) / N。
-    **判不了的单独计数，不进分母也不当 0。**"""
+    """Fetch success rate = (pass x1.0 + partial x0.5) / N.
+    **Unjudged cells are counted separately: not in the denominator, and not zero.**"""
     judged = [v for v in verdicts if v in WEIGHT]
     unjudged = len(list(verdicts)) - len(judged) if not isinstance(verdicts, list) \
         else len(verdicts) - len(judged)
@@ -54,19 +56,23 @@ def _by(rows, key):
 
 
 def _slice(rows, providers, keyfn, gapped: set | None = None):
-    """每个桶另记 `_gap_share` —— 这一桶里有多少判定落在 GT 缺口页上。
+    """Each bucket also records `_gap_share`: how many of its verdicts fall on pages
+    where no ground truth could be built.
 
-    **不按桶报置信度会误导人**：实测「硬」档 100% 的格都在缺口页上（连真 Chrome 都
-    拿不到参考），面板只能凭抓取内容自己判，而那种情况下它偏松。于是出现了
-    「硬档 88% > 软档 60%」的倒挂 —— 那是测量置信度的假象，不是能力差异。
+    **Reporting a bucket without its confidence misleads.** On the hardest pages our own
+    browser cannot obtain a reference either, so the panel judges from the fetched
+    content alone — and it is more lenient in that situation. The result is an inversion
+    where the harder tier scores higher than the easier one. That is an artefact of
+    measurement confidence, not a capability difference.
     """
     gapped = gapped or set()
     buckets: dict = {}
     for bucket, rs in _by([r for r in rows if keyfn(r) is not None], keyfn).items():
         b = {p: weighted([x["verdict"] for x in rs if x["provider"] == p])
              for p in providers}
-        # **人工核过的格不算低置信** —— 它们本来是全场最弱的，核完反而是最硬的。
-        # 不排掉的话，人工标了半天 ⚠ 也不会消失。
+        # **A human-verified cell is not low-confidence.** These start as the weakest
+        # evidence in the set and become the strongest once reviewed. Without excluding
+        # them the warning never clears and the review work counts for nothing.
         weak = [r for r in rs if r["pid"] in gapped and r.get("reason") != "human_gold"]
         b["_gap_share"] = (len(weak) / len(rs)) if rs else 0.0
         b["_human_verified"] = sum(1 for r in rs if r.get("reason") == "human_gold")
@@ -75,28 +81,30 @@ def _slice(rows, providers, keyfn, gapped: set | None = None):
     return buckets
 
 
-# 每一列的方向。**没有方向的列不排名** —— 硬排会把"仅供参考"读成"越大越好"。
-#   True  = 越大越好      False = 越小越好      None = 不排名，并说明为什么
+# The direction of each column. **A column with no direction is not ranked** — ranking
+# it anyway turns "for reference only" into "bigger is better".
+#   True = higher is better   False = lower is better   None = not ranked, with a reason
 DIAG_DIRECTION = {
-    # 延迟**不排名**：本轮对 octen 设了 2.5 秒/请求的节流，它的耗时里含我们主动等待的
-    # 时间。报告的陷阱条已经写着"延迟不能横向比"，再给它排个名就是自相矛盾。
-    # 想比速度得另跑一轮不设节流的。
+    # Latency is **not ranked**: any provider that was paced carries our deliberate
+    # waiting inside its timings. The report already warns that latency is not comparable
+    # across providers; ranking it anyway would contradict that in the same document.
+    # Comparing speed requires a separate, unpaced round.
     "latency_p50": None, "latency_p90": None, "latency_n": True,
     "slow_losses": False, "dishonest": False, "wrong_page": False,
     "mojibake": False, "suspicious_bypass": False,
-    "len_norm_median": None,   # 各家正文剥离口径不同，长不等于好
-    "panel_split": None,       # 量的是格子有多难判，不是厂商好坏
+    "len_norm_median": None,   # providers strip boilerplate differently; longer != better
+    "panel_split": None,       # measures how hard the cells were, not provider quality
 }
 NO_RANK_WHY = {
-    "latency_p50": "本轮有厂商被我们主动节流，跨家不可比",
-    "latency_p90": "同上",
-    "len_norm_median": "各家正文剥离口径不同，长不等于好",
-    "panel_split": "量的是这些格子有多难判，不是厂商好坏",
+    "latency_p50": "paced providers carry deliberate waiting; not comparable across providers",
+    "latency_p90": "as above",
+    "len_norm_median": "providers strip boilerplate differently; longer is not better",
+    "panel_split": "measures how hard these cells were to judge, not provider quality",
 }
 
 
 def rank_of(values: dict, higher_is_better: bool) -> dict:
-    """{key: 名次}。**并列同名次**；值为 None 的不参与排名。"""
+    """{key: rank}. **Ties share a rank.** None values do not take part."""
     got = [(k, v) for k, v in values.items() if v is not None]
     if not got:
         return {}
@@ -117,24 +125,26 @@ def _rk_md(n) -> str:
     return "" if not n else " ⁽%d⁾" % n
 
 
-# 诊断表的列定义：**markdown 与 HTML 共用一份** —— 两处各写一份迟早分叉。
+# Diagnostic column definitions, **shared by the markdown and HTML renderers** — two
+# copies would drift apart.
 DIAG_COLS_SPEC = [
     ("P50", "latency_p50", lambda d: "%.0f ms" % d["latency_p50"] if d["latency_p50"] else None),
     ("P90", "latency_p90", lambda d: "%.0f ms" % d["latency_p90"] if d["latency_p90"] else None),
-    ("计入延迟", "latency_n", lambda d: str(d["latency_n"])),
-    ("长度中位", "len_norm_median",
+    ("timed calls", "latency_n", lambda d: str(d["latency_n"])),
+    ("median length", "len_norm_median",
      lambda d: _fmt(d["len_norm_median"], pct=False) if d["len_norm_median"] else None),
-    ("慢失败", "slow_losses", lambda d: str(d["slow_losses"])),
+    ("slow losses", "slow_losses", lambda d: str(d["slow_losses"])),
     ("dishonest", "dishonest", lambda d: str(d["dishonest"])),
-    ("抓错页", "wrong_page", lambda d: str(d["wrong_page"])),
-    ("乱码", "mojibake", lambda d: str(d["mojibake"])),
-    ("疑似绕墙", "suspicious_bypass", lambda d: str(d["suspicious_bypass"])),
-    ("三方分歧", "panel_split", lambda d: str(d["panel_split"])),
+    ("wrong page", "wrong_page", lambda d: str(d["wrong_page"])),
+    ("mojibake", "mojibake", lambda d: str(d["mojibake"])),
+    ("suspected bypass", "suspicious_bypass", lambda d: str(d["suspicious_bypass"])),
+    ("panel split", "panel_split", lambda d: str(d["panel_split"])),
 ]
 
 
 def _cache_states(providers) -> dict:
-    """各家的实时抓开关状态。**从 adapter 读，不手抄** —— 手抄的表会和代码分叉。"""
+    """Each provider's live-fetch state. **Read from the adapters, never transcribed** —
+    a hand-written table drifts away from the code."""
     try:
         from src.fetch_backends import FETCHERS
     except Exception:                            # noqa: BLE001
@@ -150,19 +160,62 @@ def _pct(xs, q: int):
     return s[k]
 
 
-def aggregate(verdicts: list[dict], pages: list[dict]) -> dict:
-    """第一轮（run_seq 0）进主口径，重复轮只用于抖动。"""
+VERDICT_ORDER = {"lost": 0, "partial": 1, "pass": 2}
+ORDER_NAME = {0: "lost", 1: "partial", 2: "pass"}
+
+
+def collapse_rounds(verdicts: list[dict], pick: str = "median") -> list[dict]:
+    """Collapse the several rounds of one cell into a single row.
+
+    **The headline takes the median, not the first round.** On defended pages the result
+    varies from call to call: the same URL can return the article one moment and a
+    challenge screen the next. The first round is simply an arbitrary round, and using it
+    as the headline writes one roll of the dice into the report.
+
+    `pick` also accepts `best` / `worst`, which produce the envelope around the headline.
+    With the envelope reported, a reader can tell whether a few points between two
+    providers is a real difference or round-to-round noise.
+    For an even number of rounds the median takes the **lower** middle: better to
+    understate than to manufacture a high score.
+    """
+    assert pick in ("median", "best", "worst"), pick
+    groups: dict = {}
+    for v in verdicts:
+        groups.setdefault((v["pid"], v["provider"]), []).append(v)
+    out = []
+    for rows in groups.values():
+        rows = sorted(rows, key=lambda r: r.get("run_seq", 0))
+        judged = [r for r in rows if r.get("verdict") in VERDICT_ORDER]
+        if not judged:
+            out.append({**rows[0], "rounds": len(rows), "round_verdicts": []})
+            continue
+        scores = sorted(VERDICT_ORDER[r["verdict"]] for r in judged)
+        take = {"median": scores[(len(scores) - 1) // 2],
+                "best": scores[-1], "worst": scores[0]}[pick]
+        name = ORDER_NAME[take]
+        # The representative row is the **first round with that verdict**, so the
+        # diagnostic columns come from the same round as the verdict itself
+        rep = next(r for r in judged if r["verdict"] == name)
+        out.append({**rep, "rounds": len(rows),
+                    "round_verdicts": [r.get("verdict") for r in rows],
+                    "unstable": len({r["verdict"] for r in judged}) > 1})
+    return sorted(out, key=lambda r: (r["pid"], r["provider"]))
+
+
+def aggregate(verdicts: list[dict], pages: list[dict],
+              run_meta: dict | None = None) -> dict:
+    """Multiple rounds collapse per cell to their **median** (see collapse_rounds)."""
     pmap = {p["pid"]: p for p in pages}
-    base = [v for v in verdicts if v.get("run_seq", 0) == 0]
+    base = collapse_rounds(verdicts)
     providers = sorted({v["provider"] for v in base})
 
-    # ── 主口径：单一抓取成功率（跨型可比，所以总分成立）──────────────────
+    # ── Headline: a single fetch success rate, comparable across page types ───
     overall = {p: weighted([r["verdict"] for r in base if r["provider"] == p])
                for p in providers}
     ranking = sorted([(p, overall[p]["weighted"]) for p in providers
                       if overall[p]["weighted"] is not None], key=lambda x: -x[1])
 
-    # ── 切片 ────────────────────────────────────────────────────────────
+    # ── Slices ───────────────────────────────────────────────────────────────
     gapped = {p["pid"] for p in pages if (p.get("gt") or {}).get("gt_gap")}
     slices = {
         "type": _slice(base, providers, lambda r: r["type"], gapped),
@@ -185,7 +238,7 @@ def aggregate(verdicts: list[dict], pages: list[dict]) -> dict:
         probe_b[probe]["_n_pages"] = len(pids)
     slices["probes"] = probe_b
 
-    # ── 按域去重的副口径（同域先取域内均值再进总分）──────────────────────
+    # ── Secondary metric, de-duplicated by domain (average within a domain first) ──
     host_dedup = {}
     for prov in providers:
         rs = [r for r in base if r["provider"] == prov and r["verdict"] in WEIGHT]
@@ -194,14 +247,15 @@ def aggregate(verdicts: list[dict], pages: list[dict]) -> dict:
         host_dedup[prov] = {"weighted": stat.mean(vals) if vals else None,
                             "hosts": len(vals)}
 
-    # ── 诊断列（不进分数）────────────────────────────────────────────────
+    # ── Diagnostic columns (never part of the score) ─────────────────────────
     diag = {}
     for prov in providers:
         rs = [v for v in base if v["provider"] == prov]
         usable = [r["latency_ms"] for r in rs
                   if r["verdict"] in ("pass", "partial") and r.get("latency_ms")]
         diag[prov] = {
-            # **延迟只统计抓到了内容的调用**，否则量的是超时的快慢
+            # **Latency counts only calls that returned content**, otherwise it measures
+            # how quickly things time out
             "latency_p50": _pct(usable, 50), "latency_p90": _pct(usable, 90),
             "latency_n": len(usable),
             "len_norm_median": _pct([r["len_norm"] for r in rs if r["len_norm"]], 50),
@@ -215,7 +269,8 @@ def aggregate(verdicts: list[dict], pages: list[dict]) -> dict:
             "panel_split": sum(1 for r in rs if r.get("panel_split")),
         }
 
-    # ── 失败归因：指标只看成败时，"为什么没抓到"是报告的第二主角 ─────────────
+    # ── Failure attribution. When the metric only measures success, "why it was not
+    #    retrieved" is the report's second subject. ────────────────────────
     failures = {}
     for prov in providers:
         rs = [v for v in base if v["provider"] == prov and v.get("failure_reason")]
@@ -230,10 +285,12 @@ def aggregate(verdicts: list[dict], pages: list[dict]) -> dict:
     ab = [p for p in pages if p["type"] == "antibot"]
 
     return {
-        "scope": "只评抓取能力：主口径是抓取成功率，不评解析质量",
+        "scope": "Fetch capability only: the headline metric is the fetch success rate. "
+                 "Parsing quality is not scored.",
         "type_counts": {t: n for t, n in Counter(p["type"] for p in pages).items()},
         "providers": providers,
-        # 所有表的行序统一按总分名次 —— 每张表各排各的会让读者对不上号
+        # Every table uses the same row order, by overall rank; per-table ordering would
+        # stop the reader matching rows across tables
         "providers_ranked": [p for p, _ in ranking]
                             + [p for p in providers if overall[p]["weighted"] is None],
         "overall": overall, "ranking": ranking,
@@ -250,43 +307,74 @@ def aggregate(verdicts: list[dict], pages: list[dict]) -> dict:
                 and v.get("reason") != "human_gold"),
             "human_verified": sum(1 for v in base if v.get("reason") == "human_gold"),
             "cache_pinned": _cache_states(providers),
+            # Rounds: how many, how many cells disagreed across them, and the best/worst
+            # envelope of the headline. With the envelope reported, a reader can tell
+            # whether a few points of difference is signal or round-to-round noise.
+            # Which providers were paced, and by how much. The report must state this
+            # from the actual run parameters: hard-coding one provider's pacing into the
+            # template makes the sentence false for every other set of providers.
+            "pace": {k: v for k, v in ((run_meta or {}).get("pace") or {}).items() if v},
+            "rounds": max((v.get("rounds", 1) for v in base), default=1),
+            "unstable_cells": sum(1 for v in base if v.get("unstable")),
+            "envelope": {
+                p: {k: weighted([r["verdict"] for r in collapse_rounds(verdicts, k)
+                                 if r["provider"] == p])["weighted"]
+                    for k in ("worst", "median", "best")}
+                for p in providers},
         },
     }
 
 
-# ── 口径速查（跟报告放在一起，产品直接读）────────────────────────────────
+# ── Metric definitions, kept alongside the report so readers need nothing else ──
 
 MAIN_COLS = [
-    ("抓取成功率", "(成功×1.0 + 部分×0.5) ÷ n。所有页共用一个口径，跨类型、跨厂商都可比"),
-    ("成功", "拿到了这一页的实质内容：非空、确实是这条 URL 的内容、不是乱码、"
-             "不是把验证页当正文；有参考词表时命中 ≥ 30%"),
-    ("部分", "拿到一部分：付费墙前的摘要、片段、只渲染出一半的动态页"),
-    ("失败", "被拦 / 空 / 报错 / 抓成了别的页 / 乱码"),
-    ("n", "判得动的格数，也是成功率的分母"),
-    ("判不了", "我们没能做出判定。**不当 0 分** —— 既不进分子也不进分母，单独报"),
-    ("按域去重", "同一网站的多页先在域内取平均再进总分（100 页来自 87 个站，13 行同域）"),
+    ("fetch success rate",
+     "(pass x1.0 + partial x0.5) / n. One unit for every page, so it is comparable "
+     "across page types and across providers"),
+    ("pass", "the substantive content of this page came back: non-empty, genuinely this "
+             "URL, not mojibake, not a challenge screen passed off as content; where a "
+             "reference vocabulary exists, at least 30% of it is present"),
+    ("partial", "part of it came back: the free portion in front of a paywall, a "
+                "fragment, a dynamic page that only half rendered"),
+    ("lost", "blocked / empty / errored / a different page returned / mojibake"),
+    ("n", "cells that could be judged; also the denominator of the success rate"),
+    ("unjudged", "we could not reach a verdict. **Not scored as zero** — excluded from "
+                 "both the numerator and the denominator, and reported on its own"),
+    ("de-duplicated by domain",
+     "pages from the same site are averaged within that domain before entering the "
+     "total, so a site contributing many pages does not dominate"),
 ]
 
 DIAG_COLS = [
-    ("dishonest", "**把验证页 / 错误页 / 别的页当正文返回的次数。**诚实的失败下游知道要重试，"
-                  "脏数据下游不知道 —— 本轮最值得单独看的一个数"),
-    ("P50 / P90", "一次调用的中位与 90 分位耗时，**只统计抓到了内容的调用**。"
-                  "**跨家不可比** —— 本轮给 octen 设了 2.5 秒/请求的节流"),
-    ("抓错页 / 乱码", "两类硬失败：独有关键词一个都对不上 / 文本是乱码或二进制。"
-                     "直接判失败，不送面板复议"),
-    ("疑似绕墙", "付费墙页上拿到疑似完整正文的次数。**标记但不加分** —— "
-               "把拿到墙后内容算作更好，等于奖励绕墙"),
-    ("慢失败", "失败且耗时 ≥ 10 秒 —— 又慢又没拿到"),
-    ("长度中位", "抓回内容的中位长度。同家跨轮可比，**跨家仅作参考**："
-               "各家正文剥离口径不同，长不等于好"),
-    ("三方分歧", "面板三家各执一词的格数。这个数大说明那些格本身就难判"),
+    ("dishonest",
+     "**how often a challenge screen, an error page, or a different page came back as "
+     "content.** An honest failure tells the caller to retry; dirty data does not. The "
+     "single number most worth looking at on its own"),
+    ("P50 / P90",
+     "median and 90th-percentile time for one call, **counting only calls that returned "
+     "content**. **Not comparable across providers** whenever any of them was paced"),
+    ("wrong page / mojibake",
+     "two hard failures: not one distinctive keyword matched / the text is mojibake or "
+     "binary. Judged lost outright, with no panel review"),
+    ("suspected bypass",
+     "how often an apparently complete body came back from a paywalled page. "
+     "**Flagged, never rewarded** — scoring content from behind the wall as better would "
+     "reward circumventing it"),
+    ("slow losses", "failed and took 10 seconds or more: slow and empty-handed"),
+    ("median length",
+     "median length of the retrieved content. Comparable across rounds for one provider, "
+     "**for reference only across providers**, which strip boilerplate differently"),
+    ("panel split",
+     "cells where all three panel models disagreed. A high count means those cells were "
+     "genuinely hard to judge, not that a provider is bad"),
 ]
 
 FAULTS_DESC = [
-    ("provider", "厂商侧：被拦、超时、限速、返回错误 —— 真实能力差异"),
-    ("page", "页面侧：这一页本身就没有可提取的内容"),
-    ("harness", "**我们自己的锅**：账户欠费、我们的长度上限、我们的解析器崩了。"
-                "单列一栏，不记到厂商头上"),
+    ("provider", "the provider's side: blocked, timed out, rate-limited, returned an "
+                 "error — a real capability difference"),
+    ("page", "the page's side: this page has no extractable content to begin with"),
+    ("harness", "**our own fault**: an exhausted account, our size cap, our parser "
+                "crashing. Reported in its own column, never charged to the provider"),
 ]
 
 
@@ -296,45 +384,62 @@ def _traps(agg: dict) -> list[tuple[str, str]]:
            if isinstance(b, dict) and b.get("_gap_share", 0) >= LOW_CONFIDENCE]
     out = []
     if low:
-        out.append(("带 ⚠ 的桶：高分不等于能力强",
-                    "那些页我们自己的浏览器也拿不到参考内容，面板只能凭抓取结果自己判，"
-                    "而那种情况下它偏松。于是会出现「越难的档分越高」的倒挂 —— "
-                    "**那是测量置信度的假象，不是能力差异**。"))
-    out.append(("延迟不能横向比",
-                "本轮对 octen 设了 2.5 秒/请求的节流（它在更快的节奏下会拒绝请求），"
-                "它的延迟里含我们主动等待的时间。要比速度需要另跑一轮不设节流的测试。"))
-    out.append(("成功率高 + dishonest 高，比成功率略低更该警惕",
-                "成功率只看「拿到没有」。一家成功率不错但 dishonest 明显偏高，"
-                "意味着它失败时倾向于返回一段**看起来像内容的东西**，而下游分辨不出来。"
-                "接入前把这两个数放在一起看。"))
+        out.append(("A bucket marked low-confidence: a high score is not strength",
+                    "On those pages our own browser cannot obtain reference content "
+                    "either, so the panel judges from the fetched result alone — and it "
+                    "is more lenient in that situation. That produces the inversion "
+                    "where a harder tier scores higher. **It is an artefact of "
+                    "measurement confidence, not a capability difference.**"))
+    pace = m.get("pace") or {}
+    if pace:
+        out.append(("Latency is not comparable across providers",
+                    "This round paced %s, because they reject requests at a faster "
+                    "cadence. Their timings therefore include waiting we imposed. "
+                    "Comparing speed needs a separate, unpaced round."
+                    % ", ".join("%s at %gs/request" % (k, v)
+                                for k, v in sorted(pace.items()))))
+    out.append(("A high success rate with a high dishonest count is worse than a "
+                "slightly lower success rate",
+                "The success rate only asks whether the content came back. A provider "
+                "with a decent rate but a markedly higher dishonest count tends, when it "
+                "fails, to return **something that looks like content** — and nothing "
+                "downstream can tell. Read the two numbers together before integrating."))
     if m["verdicts_on_gt_gap_pages"]:
-        out.append(("GT 缺口页上的判定，证据强度更低",
-                    "%d 个页面我们自己也抓不到、无法建立参考答案；本轮 %d 格判定落在这些页上，"
-                    "完全依赖面板的主观判断。方法学声明里列出了这些页面的名字，"
-                    "结论对它们敏感时应逐条人工核。"
+        out.append(("Verdicts on ground-truth gap pages rest on weaker evidence",
+                    "%d pages could not be fetched by us either, so no reference answer "
+                    "exists for them; %d verdicts fall on those pages and depend entirely "
+                    "on the panel's judgement. They are named in the methodology notes; "
+                    "review them individually if a conclusion is sensitive to them."
                     % (len(m["gt_gaps"]), m["verdicts_on_gt_gap_pages"])))
     return out
 
 
 def render_glossary_md(agg: dict) -> list[str]:
-    L = ["", "## 口径速查", "",
-         "**范围**：本轮只回答「这一页抓到了没有」。不评抓得干不干净、结构全不全 —— "
-         "那属于解析质量，不在范围内。", "",
-         "### 主表各列", "", "| 列 | 口径 |", "|---|---|"]
+    L = ["", "## Metric definitions", "",
+         "**Scope**: this evaluation answers one question — was the page retrieved. How "
+         "cleanly it was parsed and how completely it was structured are parsing "
+         "quality, and are out of scope.", "",
+         "### Main table columns", "", "| Column | Definition |", "|---|---|"]
     L += ["| %s | %s |" % kv for kv in MAIN_COLS]
-    L += ["", "### 判定怎么做出来的", "",
-          "两层。**先机械判**：内容命中率、是不是这条 URL 的内容、有没有乱码、"
-          "动态页里 JS 执行后才出现的内容来了没有 —— 参考词表来自我们自己把这 100 页"
-          "各渲染一遍（导航栏、页脚这些骨架词已剔除）。**拿不准的交面板**：三个不同厂商的"
-          "模型盲判、多数决，各自看不到机械层结论、也看不到别家和别的模型的判定；"
-          "三方各执一词时不硬选。机械层**确定**的结论（抓错页 / 乱码 / 传输失败）不送复议。",
-          "", "### 诊断列（不进分数）", "", "| 列 | 口径 |", "|---|---|"]
+    L += ["", "### How a verdict is reached", "",
+          "Two layers. **The mechanical layer runs first**: content hit rate, whether "
+          "this is the content of this URL, whether the text is mojibake, and whether "
+          "content that only appears after JavaScript runs is present. The reference "
+          "vocabulary comes from rendering every page ourselves, with navigation and "
+          "footer terms removed so the hit rate measures the body. **Anything it cannot "
+          "settle goes to the panel**: three models from three different vendors judge "
+          "blind and the majority wins. None of them sees the mechanical verdict, the "
+          "other providers' attribution, or each other's rulings, and a three-way split "
+          "is not forced. Conclusions the mechanical layer is **certain** of — wrong "
+          "page, mojibake, transport failure — are never sent for review.",
+          "", "### Diagnostic columns (not part of the score)", "",
+          "| Column | Definition |", "|---|---|"]
     L += ["| %s | %s |" % kv for kv in DIAG_COLS]
-    L += ["", "### 失败归因的责任方", "", "| 责任方 | 意思 |", "|---|---|"]
+    L += ["", "### Who a failure is attributed to", "", "| Fault | Meaning |", "|---|---|"]
     L += ["| `%s` | %s |" % kv for kv in FAULTS_DESC]
-    L += ["", "### 别读错的几个地方", ""]
+    L += ["", "### Easy things to misread", ""]
     for i, (h, body) in enumerate(_traps(agg), 1):
-        L.append("%d. **%s** —— %s" % (i, h, body))
+        L.append("%d. **%s** — %s" % (i, h, body))
     return L
 
 
@@ -344,7 +449,7 @@ def _fmt(x, pct=True):
     return "%.0f%%" % (x * 100) if pct else "%.0f" % x
 
 
-LOW_CONFIDENCE = 0.5      # 一桶里过半判定落在 GT 缺口页上 -> 标低置信
+LOW_CONFIDENCE = 0.5      # half or more of a bucket on gap pages -> mark low confidence
 
 
 def _slice_table(title: str, buckets: dict, providers: list, labels: dict | None = None):
@@ -355,8 +460,9 @@ def _slice_table(title: str, buckets: dict, providers: list, labels: dict | None
     for k in keys:
         mark = " ⚠" if buckets[k]["_gap_share"] >= LOW_CONFIDENCE else ""
         heads.append("%s(%d)%s" % ((labels or {}).get(k, k), buckets[k]["_n_pages"], mark))
-    # 每一列**列内**排名（并列同名次）。行序按总分，所以名次要标在格子里 ——
-    # 换成按列排行序的话，五张表的行序各不相同，读者对不上号。
+    # Rank **within each column** (ties share a rank). Rows are ordered by the overall
+    # score, so the rank has to be printed in the cell: ordering each table by its own
+    # column would give the five tables five different row orders.
     rk = {k: rank_of({p: buckets[k][p]["weighted"] for p in providers}, True) for k in keys}
     L = ["", "### %s" % title, "",
          "| provider | " + " | ".join(heads) + " |",
@@ -364,25 +470,31 @@ def _slice_table(title: str, buckets: dict, providers: list, labels: dict | None
     for p in providers:
         L.append("| %s | %s |" % (p, " | ".join(
             _fmt(buckets[k][p]["weighted"]) + _rk_md(rk[k].get(p)) for k in keys)))
-    L += ["", "*上标是该列的名次（并列同名次）。*"]
+    L += ["", "*The superscript is the rank within that column; ties share a rank.*"]
     low = [((labels or {}).get(k, k), buckets[k]["_gap_share"]) for k in keys
            if buckets[k]["_gap_share"] >= LOW_CONFIDENCE]
     if low:
-        L += ["", "> ⚠ **低置信**：%s —— 这些桶里的判定大多落在 GT 缺口页上"
-              "（我们自己的浏览器也拿不到参考），面板只能凭抓取内容自己判，"
-              "而那种情况下它偏松。**不要把这些格子的高分读成能力更强。**"
-              % "、".join("%s %.0f%%" % (n, v * 100) for n, v in low)]
+        L += ["", "> ⚠ **Low confidence**: %s. Most verdicts in these buckets fall on "
+              "ground-truth gap pages, where our own browser cannot obtain a reference "
+              "either, so the panel judges from the fetched content alone — and it is "
+              "more lenient in that situation. **Do not read a high score in these "
+              "cells as greater capability.**"
+              % ", ".join("%s %.0f%%" % (n, v * 100) for n, v in low)]
     return L
 
 
 def render_markdown(agg: dict) -> str:
     m = agg["meta"]
-    L = ["# Fetch Provider 抓取能力评测", "",
+    L = ["# Fetch provider capability evaluation", "",
          "**%s**" % agg["scope"], "",
-         "页面 %d · 判定格 %d · %d 家" % (m["n_pages"], m["n_cells"], len(agg["providers"])),
-         "", "## 主表：抓取成功率", "",
-         "成功计 1.0、部分计 0.5。`n` 是**判得动的格数** —— 判不了的不进分母也不当 0 分。",
-         "", "| # | provider | 抓取成功率 | 成功 | 部分 | 失败 | n | 判不了 | 按域去重 |",
+         "%d pages · %d judged cells · %d provider%s"
+         % (m["n_pages"], m["n_cells"], len(agg["providers"]),
+            "" if len(agg["providers"]) == 1 else "s"),
+         "", "## Headline: fetch success rate", "",
+         "A pass counts 1.0 and a partial 0.5. `n` is the number of cells that **could "
+         "be judged** — unjudged cells enter neither the denominator nor the score.",
+         "", "| # | provider | success rate | pass | partial | lost | n | unjudged | "
+         "by domain |",
          "|---|---|--:|--:|--:|--:|--:|--:|--:|"]
     for i, (prov, w) in enumerate(agg["ranking"], 1):
         o = agg["overall"][prov]
@@ -395,21 +507,24 @@ def render_markdown(agg: dict) -> str:
             L.append("| — | %s | %s | 0 | 0 | 0 | 0 | %d | %s |"
                      % (prov, UNLABELLED, agg["overall"][prov]["unjudged"], UNLABELLED))
 
-    L += ["", "## 切片"]
+    L += ["", "## Slices"]
     pr = agg["providers_ranked"]
-    L += _slice_table("按页面类型", agg["slices"]["type"], pr, TYPE_LABEL)
-    L += _slice_table("反爬页按墙的类型", agg["slices"]["antibot_subclass"], pr, SUBCLASS_LABEL)
-    L += _slice_table("反爬页按防护强度", agg["slices"]["strength"], pr, STRENGTH_LABEL)
-    L += _slice_table("文档文件按格式", agg["slices"]["doc_type"], pr)
-    L += _slice_table("健壮性探针", agg["slices"]["probes"], pr)
+    L += _slice_table("By page type", agg["slices"]["type"], pr, TYPE_LABEL)
+    L += _slice_table("Anti-bot pages by wall type", agg["slices"]["antibot_subclass"],
+                      pr, SUBCLASS_LABEL)
+    L += _slice_table("Anti-bot pages by protection strength", agg["slices"]["strength"],
+                      pr, STRENGTH_LABEL)
+    L += _slice_table("Document files by format", agg["slices"]["doc_type"], pr)
+    L += _slice_table("Robustness probes", agg["slices"]["probes"], pr)
 
     fail_n = {p: sum(agg["failures"][p].values()) for p in agg["providers"]}
-    fr = rank_of(fail_n, False)                  # 失败越少越好
-    hr = rank_of(agg["harness_faults"], False)   # 我们自己的锅也越少越好
-    L += ["", "## 为什么没抓到", "",
-          "指标只看成败时，失败归因是第二主角。`harness` = 我们自己的锅，单独列。"
-          "**两列都是越少越好**，上标是名次。", "",
-          "| provider | 失败总数 | harness | 明细 |", "|---|--:|--:|---|"]
+    fr = rank_of(fail_n, False)                  # fewer failures is better
+    hr = rank_of(agg["harness_faults"], False)   # fewer of our own faults is better
+    L += ["", "## Why it was not retrieved", "",
+          "When the metric only measures success, failure attribution is the report's "
+          "second subject. `harness` counts our own faults and is listed separately. "
+          "**Lower is better in both columns**; the superscript is the rank.", "",
+          "| provider | failures | harness | detail |", "|---|--:|--:|---|"]
     for prov in agg["providers_ranked"]:
         f = agg["failures"][prov]
         L.append("| %s | %d%s | %d%s | %s |"
@@ -424,8 +539,9 @@ def render_markdown(agg: dict) -> str:
                         else rank_of({p: agg["diagnostics"][p][field]
                                       for p in agg["providers"]}, d))
     arrow = {True: " ↑", False: " ↓", None: " —"}
-    L += ["", "## 诊断列（不进分数）", "",
-          "上标是该列名次。**↑ = 越大越好 · ↓ = 越小越好 · — = 这一列不排名**（见表下说明）。",
+    L += ["", "## Diagnostic columns (not part of the score)", "",
+          "The superscript is the rank within the column. **↑ higher is better · "
+          "↓ lower is better · — not ranked** (reasons below the table).",
           "",
           "| provider | " + " | ".join(
               n + arrow[DIAG_DIRECTION.get(f)] for n, f, _ in DIAG_COLS_SPEC) + " |",
@@ -437,40 +553,66 @@ def render_markdown(agg: dict) -> str:
             val = fmt(d)
             cells.append((val or UNLABELLED) + _rk_md(ranks[field].get(prov)))
         L.append("| %s | %s |" % (prov, " | ".join(cells)))
-    L += ["", "**不排名的列**：" + "；".join(
-        "`%s` —— %s" % (n, NO_RANK_WHY[f]) for n, f, _ in DIAG_COLS_SPEC
-        if DIAG_DIRECTION.get(f) is None) + "。硬给它们排名会把「仅供参考」读成「越大越好」。"]
+    L += ["", "**Columns that are not ranked**: " + "; ".join(
+        "`%s` — %s" % (n, NO_RANK_WHY[f]) for n, f, _ in DIAG_COLS_SPEC
+        if DIAG_DIRECTION.get(f) is None)
+        + ". Ranking them would turn \"for reference only\" into \"bigger is better\"."]
 
     L += [""]
     L += render_glossary_md(agg)
-    L += ["", "## 方法学声明", "",
-          "- **只评抓取能力**：主口径是「这一页抓到了没有」。不评正文纯度、结构保真、"
-          "截断完整度 —— 那三项是解析质量，已从代码里删除。",
-          "- 反爬页的「过」按墙的类型定义：WAF = 拿到正文；登录墙 = 拿到墙前内容**且标明是墙**；"
-          "付费墙 = 拿到免费可见部分。**拿到墙后内容不加分**，标 `suspicious_bypass`。",
-          "- 防护强度档（两条 GT 通道比对得出）：%s" % (m["strength_counts"] or UNLABELLED)]
+    L += ["", "## Methodology notes", "",
+          "- **Fetch capability only.** The headline metric asks whether the page was "
+          "retrieved. Text purity, structural fidelity and truncation completeness are "
+          "parsing quality and were removed from the code.",
+          "- On anti-bot pages, passing is defined per wall type: WAF = the body was "
+          "retrieved; login wall = the pre-wall content was retrieved **and identified "
+          "as a wall**; paywall = the free portion was retrieved. **Content from behind "
+          "the wall earns nothing** and is flagged `suspicious_bypass`.",
+          "- Protection tiers, derived by comparing the two ground-truth channels: %s"
+          % (m["strength_counts"] or UNLABELLED)]
     if m["gt_gaps"]:
-        L.append("- **GT 缺口 %d 条** —— 判定器跳过其词表，面板改为就抓取内容本身判断：%s"
+        L.append("- **%d ground-truth gap pages.** The judge skips their vocabulary and "
+                 "the panel rules on the fetched content itself: %s"
                  % (len(m["gt_gaps"]),
-                    "、".join("%s/%s(%s)" % (g["pid"], g["host"], g["why"])
+                    ", ".join("%s/%s(%s)" % (g["pid"], g["host"], g["why"])
                               for g in m["gt_gaps"])))
-    L.append("- 判不了的格共 %d（如实留空，不当 0 分）" % m["unjudged_total"])
+    L.append("- %d cells could not be judged; left genuinely unjudged, never scored as "
+             "zero" % m["unjudged_total"])
     if m["verdicts_on_gt_gap_pages"]:
-        L.append("- **%d 格的判定落在 GT 缺口页上** —— 面板没有参考渲染、凭抓取内容自己判，"
-                 "证据强度低于有 GT 的页" % m["verdicts_on_gt_gap_pages"])
-    L.append("- 延迟只统计抓到了内容的调用；长度中位数同家跨轮可比，跨家仅供参考")
+        L.append("- **%d verdicts fall on ground-truth gap pages.** The panel had no "
+                 "reference render and ruled on the fetched content alone, so the "
+                 "evidence is weaker than on pages with ground truth"
+                 % m["verdicts_on_gt_gap_pages"])
+    if m.get("rounds", 1) > 1:
+        env = m.get("envelope") or {}
+        L.append("- **%d rounds were run and the headline takes the per-cell median.** "
+                 "%d of %d cells did not agree across rounds. Best and worst round: %s. "
+                 "A difference smaller than that envelope is round-to-round noise, not a "
+                 "capability gap."
+                 % (m["rounds"], m["unstable_cells"], m["n_cells"],
+                    "; ".join("%s %s-%s" % (p, _fmt(e["worst"]), _fmt(e["best"]))
+                              for p, e in sorted(env.items()))))
+    else:
+        L.append("- **Only one round was run**, so the headline carries the full "
+                 "round-to-round variance of a single sample. On defended pages that is "
+                 "substantial; use `--repeat` before comparing providers.")
+    L.append("- Latency counts only calls that returned content. Median length is "
+             "comparable across rounds for one provider, and for reference only across "
+             "providers")
     cp = agg["meta"].get("cache_pinned") or {}
     if cp:
-        L.append("- **各家的「实时抓、不走缓存」开关已显式设上**：%s。"
-                 "标 `no_knob` 的家官方 API 没有这个参数；标 `unpinned` 的是我们还没接线的家。"
+        L.append("- **Each provider's live-fetch (cache-bypass) switch was set "
+                 "explicitly**: %s. `no_knob` means the documented API has no such "
+                 "parameter; `unpinned` means the provider is not wired up yet."
                  % " · ".join("%s=%s" % kv for kv in sorted(cp.items())))
-    L.append("- **本轮仍不测内容新鲜度。** 开关只保证这一次去实抓了，不保证各家抓到的是"
-             "同一时刻的页面。需要实时性的场景要另做一轮时效测试。")
+    L.append("- **Content freshness is not measured.** The switch guarantees a live "
+             "fetch happened; it does not guarantee that every provider saw the page at "
+             "the same moment. A time-sensitive use case needs a separate round.")
     return "\n".join(L)
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# artifact 页
+# Standalone HTML page
 # ══════════════════════════════════════════════════════════════════════════
 
 _CSS = """
@@ -541,10 +683,12 @@ def _sl_html(title, buckets, providers, labels=None):
         rows.append("<tr><td>%s</td>%s</tr>" % (p, tds))
     low = [((labels or {}).get(k, k), buckets[k]["_gap_share"]) for k in keys
            if buckets[k]["_gap_share"] >= LOW_CONFIDENCE]
-    warn = ('<p class="fx-note">&#9888; <strong>低置信</strong>：%s —— 这些桶里的判定大多'
-            '落在 GT 缺口页上（我们自己的浏览器也拿不到参考），面板只能凭抓取内容自己判，'
-            '而那种情况下它偏松。<strong>不要把这些格子的高分读成能力更强。</strong></p>'
-            % "、".join("%s %.0f%%" % (n, v * 100) for n, v in low)) if low else ""
+    warn = ('<p class="fx-note">&#9888; <strong>Low confidence</strong>: %s. Most '
+            'verdicts in these buckets fall on ground-truth gap pages, where our own '
+            'browser cannot obtain a reference either, so the panel rules on the '
+            'fetched content alone &mdash; and it is more lenient in that situation. '
+            '<strong>Do not read a high score here as greater capability.</strong></p>'
+            % ", ".join("%s %.0f%%" % (n, v * 100) for n, v in low)) if low else ""
     return ('<div class="fx-sec">%s</div>%s<div class="fx-scroll"><table class="fx-t">'
             '<thead><tr><th>provider</th>%s</tr></thead><tbody>%s</tbody></table></div>'
             % (title, warn, head, "".join(rows)))
@@ -552,8 +696,8 @@ def _sl_html(title, buckets, providers, labels=None):
 
 def _kv_table(pairs) -> str:
     rows = "".join("<tr><td>%s</td><td>%s</td></tr>" % (k, _md_bold(v)) for k, v in pairs)
-    return ('<div class="fx-scroll"><table class="fx-t fx-kv"><thead><tr><th>列</th>'
-            '<th>口径</th></tr></thead><tbody>%s</tbody></table></div>' % rows)
+    return ('<div class="fx-scroll"><table class="fx-t fx-kv"><thead><tr><th>Column</th>'
+            '<th>Definition</th></tr></thead><tbody>%s</tbody></table></div>' % rows)
 
 
 def _md_bold(t: str) -> str:
@@ -562,40 +706,50 @@ def _md_bold(t: str) -> str:
 
 
 def render_glossary_html(agg: dict) -> str:
-    H = ['<div class="fx-sec">口径速查</div>',
-         '<p class="fx-note"><strong>范围</strong>：本轮只回答「这一页抓到了没有」。'
-         '不评抓得干不干净、结构全不全 —— 那属于解析质量，不在范围内。</p>',
-         '<div class="fx-sub2">主表各列</div>', _kv_table(MAIN_COLS),
-         '<div class="fx-sub2">判定怎么做出来的</div>',
-         '<p class="fx-note">两层。<strong>先机械判</strong>：内容命中率、是不是这条 URL 的内容、'
-         '有没有乱码、动态页里 JS 执行后才出现的内容来了没有 —— 参考词表来自我们自己把这 100 页'
-         '各渲染一遍（导航栏、页脚这些骨架词已剔除）。<strong>拿不准的交面板</strong>：'
-         '三个不同厂商的模型盲判、多数决，各自看不到机械层结论、也看不到别家和别的模型的判定；'
-         '三方各执一词时不硬选。机械层<strong>确定</strong>的结论（抓错页 / 乱码 / 传输失败）'
-         '不送复议。</p>',
-         '<div class="fx-sub2">诊断列（不进分数）</div>', _kv_table(DIAG_COLS),
-         '<div class="fx-sub2">失败归因的责任方</div>',
+    H = ['<div class="fx-sec">Metric definitions</div>',
+         '<p class="fx-note"><strong>Scope</strong>: this evaluation answers one '
+         'question &mdash; was the page retrieved. How cleanly it was parsed and how '
+         'completely it was structured are parsing quality, and are out of scope.</p>',
+         '<div class="fx-sub2">Main table columns</div>', _kv_table(MAIN_COLS),
+         '<div class="fx-sub2">How a verdict is reached</div>',
+         '<p class="fx-note">Two layers. <strong>The mechanical layer runs first</strong>: '
+         'content hit rate, whether this is the content of this URL, whether the text is '
+         'mojibake, and whether content that only appears after JavaScript runs is '
+         'present. The reference vocabulary comes from rendering every page ourselves, '
+         'with navigation and footer terms removed so the hit rate measures the body. '
+         '<strong>Anything it cannot settle goes to the panel</strong>: three models from '
+         'three different vendors judge blind and the majority wins. None sees the '
+         'mechanical verdict, the provider attribution, or the other models&rsquo; '
+         'rulings, and a three-way split is not forced. Conclusions the mechanical layer '
+         'is <strong>certain</strong> of &mdash; wrong page, mojibake, transport failure '
+         '&mdash; are never sent for review.</p>',
+         '<div class="fx-sub2">Diagnostic columns (not part of the score)</div>',
+         _kv_table(DIAG_COLS),
+         '<div class="fx-sub2">Who a failure is attributed to</div>',
          _kv_table([("<code>%s</code>" % k, v) for k, v in FAULTS_DESC]),
-         '<div class="fx-sub2">别读错的几个地方</div>']
-    items = "".join("<li><strong>%s</strong> —— %s</li>" % (h, _md_bold(b))
+         '<div class="fx-sub2">Easy things to misread</div>']
+    items = "".join("<li><strong>%s</strong> &mdash; %s</li>" % (h, _md_bold(b))
                     for h, b in _traps(agg))
     H.append('<div class="fx-card"><ol class="fx-traps">%s</ol></div>' % items)
     return "".join(H)
 
 
-def render_html(agg: dict, title: str = "Fetch 百页抓取实测") -> str:
-    """artifact 页。按 playbook §10：数据作 JS 字面量嵌入；类名一律 `fx-` 前缀，
-    不撞共享样式；`th,td` 上的属性逐个显式重申。"""
+def render_html(agg: dict, title: str = "Fetch provider capability") -> str:
+    """A standalone HTML page. Data is embedded as a JavaScript literal, every class name
+    carries an `fx-` prefix so nothing collides with a host stylesheet, and cell
+    attributes are restated explicitly on every `th`/`td`."""
     m = agg["meta"]
     H = ["<title>%s</title>" % title, "<style>%s</style>" % _CSS,
          '<div class="fx-wrap">', '<h1 class="fx-h1">%s</h1>' % title,
-         '<p class="fx-sub">%d 页 · %d 判定格 · %d 家</p>'
-         % (m["n_pages"], m["n_cells"], len(agg["providers"])),
+         '<p class="fx-sub">%d pages &middot; %d judged cells &middot; %d provider%s</p>'
+         % (m["n_pages"], m["n_cells"], len(agg["providers"]),
+            "" if len(agg["providers"]) == 1 else "s"),
          '<div class="fx-scope">%s</div>' % agg["scope"]]
 
-    H.append('<div class="fx-sec">抓取成功率</div>')
-    H.append('<p class="fx-note">成功计 1.0、部分计 0.5。<code>n</code> 是判得动的格数 —— '
-             '判不了的不进分母也不当 0 分。</p>')
+    H.append('<div class="fx-sec">Fetch success rate</div>')
+    H.append('<p class="fx-note">A pass counts 1.0 and a partial 0.5. <code>n</code> is '
+             'the number of cells that could be judged; unjudged cells enter neither the '
+             'denominator nor the score.</p>')
     body = []
     for i, (prov, w) in enumerate(agg["ranking"], 1):
         o = agg["overall"][prov]
@@ -606,21 +760,25 @@ def render_html(agg: dict, title: str = "Fetch 百页抓取实测") -> str:
                     % (i, prov, _cls(w), _fmt(w), o["pass"], o["partial"], o["lost"],
                        o["n"], o["unjudged"], _cls(hd), _fmt(hd)))
     H.append('<div class="fx-scroll"><table class="fx-t"><thead><tr><th>#</th>'
-             '<th>provider</th><th>抓取成功率</th><th>成功</th><th>部分</th><th>失败</th>'
-             '<th>n</th><th>判不了</th><th>按域去重</th></tr></thead><tbody>%s</tbody>'
+             '<th>provider</th><th>success rate</th><th>pass</th><th>partial</th>'
+             '<th>lost</th><th>n</th><th>unjudged</th><th>by domain</th></tr></thead>'
+             '<tbody>%s</tbody>'
              '</table></div>' % "".join(body))
 
     pr = agg["providers_ranked"]
-    H.append(_sl_html("按页面类型", agg["slices"]["type"], pr, TYPE_LABEL))
-    H.append(_sl_html("反爬页按墙的类型", agg["slices"]["antibot_subclass"], pr, SUBCLASS_LABEL))
-    H.append(_sl_html("反爬页按防护强度", agg["slices"]["strength"], pr, STRENGTH_LABEL))
-    H.append(_sl_html("文档文件按格式", agg["slices"]["doc_type"], pr))
-    H.append(_sl_html("健壮性探针", agg["slices"]["probes"], pr))
+    H.append(_sl_html("By page type", agg["slices"]["type"], pr, TYPE_LABEL))
+    H.append(_sl_html("Anti-bot pages by wall type", agg["slices"]["antibot_subclass"],
+                      pr, SUBCLASS_LABEL))
+    H.append(_sl_html("Anti-bot pages by protection strength", agg["slices"]["strength"],
+                      pr, STRENGTH_LABEL))
+    H.append(_sl_html("Document files by format", agg["slices"]["doc_type"], pr))
+    H.append(_sl_html("Robustness probes", agg["slices"]["probes"], pr))
 
-    H.append('<div class="fx-sec">为什么没抓到</div>')
-    H.append('<p class="fx-note">指标只看成败时，失败归因是第二主角。'
-             '<code>harness</code> = 我们自己的锅，单独列。<strong>两列都是越少越好</strong>，'
-             '上标是名次。</p>')
+    H.append('<div class="fx-sec">Why it was not retrieved</div>')
+    H.append('<p class="fx-note">When the metric only measures success, failure '
+             'attribution is the second subject. <code>harness</code> counts our own '
+             'faults and is listed separately. <strong>Lower is better in both '
+             'columns</strong>; the superscript is the rank.</p>')
     fail_n = {p: sum(agg["failures"][p].values()) for p in agg["providers"]}
     fr, hr = rank_of(fail_n, False), rank_of(agg["harness_faults"], False)
     frows = []
@@ -631,12 +789,13 @@ def render_html(agg: dict, title: str = "Fetch 百页抓取实测") -> str:
                         agg["harness_faults"][prov], _rk(hr.get(prov)),
                         ", ".join("%s&times;%d" % kv for kv in sorted(f.items())) or "—"))
     H.append('<div class="fx-scroll"><table class="fx-t"><thead><tr><th>provider</th>'
-             '<th>失败总数 &darr;</th><th>harness &darr;</th><th>明细</th></tr></thead>'
+             '<th>failures &darr;</th><th>harness &darr;</th><th>detail</th></tr></thead>'
              '<tbody>%s</tbody></table></div>' % "".join(frows))
 
-    H.append('<div class="fx-sec">诊断列（不进分数）</div>')
-    H.append('<p class="fx-note">上标是该列名次。<strong>&uarr; 越大越好 · &darr; 越小越好 · '
-             '&mdash; 这一列不排名</strong>（原因见表下）。</p>')
+    H.append('<div class="fx-sec">Diagnostic columns (not part of the score)</div>')
+    H.append('<p class="fx-note">The superscript is the rank within the column. '
+             '<strong>&uarr; higher is better &middot; &darr; lower is better &middot; '
+             '&mdash; not ranked</strong> (reasons below the table).</p>')
     ranks = {}
     for _, field, _f in DIAG_COLS_SPEC:
         d = DIAG_DIRECTION.get(field)
@@ -658,43 +817,71 @@ def render_html(agg: dict, title: str = "Fetch 百页抓取实测") -> str:
         drows.append("<tr><td>%s</td>%s</tr>" % (prov, "".join(tds)))
     H.append('<div class="fx-scroll"><table class="fx-t"><thead><tr><th>provider</th>%s'
              '</tr></thead><tbody>%s</tbody></table></div>' % (head, "".join(drows)))
-    H.append('<p class="fx-note"><strong>不排名的列</strong>：%s。'
-             '硬给它们排名会把「仅供参考」读成「越大越好」。</p>'
-             % "；".join("<code>%s</code> —— %s" % (n, NO_RANK_WHY[f])
+    H.append('<p class="fx-note"><strong>Columns that are not ranked</strong>: %s. '
+             'Ranking them would turn &ldquo;for reference only&rdquo; into '
+             '&ldquo;bigger is better&rdquo;.</p>'
+             % "; ".join("<code>%s</code> &mdash; %s" % (n, NO_RANK_WHY[f])
                          for n, f, _ in DIAG_COLS_SPEC if DIAG_DIRECTION.get(f) is None))
 
     H.append(render_glossary_html(agg))
 
-    H.append('<div class="fx-sec">方法学声明</div>')
-    notes = ["<li><strong>只评抓取能力</strong>：主口径是「这一页抓到了没有」。不评正文纯度、"
-             "结构保真、截断完整度 —— 那三项是解析质量，已从代码里删除。</li>",
-             "<li>反爬页的「过」按墙的类型定义：WAF = 拿到正文；登录墙 = 拿到墙前内容"
-             "<strong>且标明是墙</strong>；付费墙 = 拿到免费可见部分。"
-             "<strong>拿到墙后内容不加分</strong>。</li>",
-             "<li>防护强度档（两条 GT 通道比对得出）：%s</li>"
+    H.append('<div class="fx-sec">Methodology notes</div>')
+    notes = ["<li><strong>Fetch capability only.</strong> The headline metric asks "
+             "whether the page was retrieved. Text purity, structural fidelity and "
+             "truncation completeness are parsing quality and were removed from the "
+             "code.</li>",
+             "<li>On anti-bot pages, passing is defined per wall type: WAF = the body "
+             "was retrieved; login wall = the pre-wall content was retrieved "
+             "<strong>and identified as a wall</strong>; paywall = the free portion "
+             "was retrieved. <strong>Content from behind the wall earns "
+             "nothing.</strong></li>",
+             "<li>Protection tiers, derived by comparing the two ground-truth "
+             "channels: %s</li>"
              % (m["strength_counts"] or UNLABELLED),
             ]
     if m["gt_gaps"]:
-        notes.append("<li><strong>GT 缺口 %d 条</strong> —— 判定器跳过其词表，面板改为就"
-                     "抓取内容本身判断：%s</li>"
+        notes.append("<li><strong>%d ground-truth gap pages.</strong> The judge skips "
+                     "their vocabulary and the panel rules on the fetched content "
+                     "itself: %s</li>"
                      % (len(m["gt_gaps"]),
-                        "、".join("%s/%s" % (g["pid"], g["host"]) for g in m["gt_gaps"])))
+                        ", ".join("%s/%s" % (g["pid"], g["host"]) for g in m["gt_gaps"])))
     cp = m.get("cache_pinned") or {}
     if cp:
-        notes.append("<li><strong>各家的「实时抓、不走缓存」开关已显式设上</strong>：%s。"
-                     "<code>no_knob</code> = 官方 API 没有这个参数；"
-                     "<code>unpinned</code> = 我们还没接线的家。</li>"
+        notes.append("<li><strong>Each provider's live-fetch (cache-bypass) switch was "
+                     "set explicitly</strong>: %s. <code>no_knob</code> = the "
+                     "documented API has no such parameter; <code>unpinned</code> = the "
+                     "provider is not wired up yet.</li>"
                      % " · ".join("%s=%s" % kv for kv in sorted(cp.items())))
-    notes.append("<li><strong>本轮仍不测内容新鲜度</strong> —— 开关只保证这一次去实抓了，"
-                 "不保证各家抓到的是同一时刻的页面。需要实时性的场景要另做一轮时效测试。</li>")
-    notes.append("<li>判不了的格共 %d —— 如实留空，不当 0 分</li>" % m["unjudged_total"])
+    notes.append("<li><strong>Content freshness is not measured.</strong> The switch "
+                 "guarantees a live fetch happened; it does not guarantee every "
+                 "provider saw the page at the same moment. A time-sensitive use case "
+                 "needs a separate round.</li>")
+    if m.get("rounds", 1) > 1:
+        env = m.get("envelope") or {}
+        notes.append("<li><strong>%d rounds were run and the headline takes the per-cell "
+                     "median.</strong> %d of %d cells did not agree across rounds. Best "
+                     "and worst round: %s. A difference smaller than that envelope is "
+                     "round-to-round noise, not a capability gap.</li>"
+                     % (m["rounds"], m["unstable_cells"], m["n_cells"],
+                        "; ".join("%s %s&ndash;%s" % (p, _fmt(e["worst"]), _fmt(e["best"]))
+                                  for p, e in sorted(env.items()))))
+    else:
+        notes.append("<li><strong>Only one round was run</strong>, so the headline "
+                     "carries the full round-to-round variance of a single sample. On "
+                     "defended pages that is substantial; use <code>--repeat</code> "
+                     "before comparing providers.</li>")
+    notes.append("<li>%d cells could not be judged; left genuinely unjudged, never "
+                 "scored as zero</li>" % m["unjudged_total"])
     if m["verdicts_on_gt_gap_pages"]:
-        notes.append("<li><strong>%d 格的判定落在 GT 缺口页上</strong> —— 面板没有参考渲染、"
-                     "凭抓取内容自己判，证据强度低于有 GT 的页</li>"
+        notes.append("<li><strong>%d verdicts fall on ground-truth gap pages.</strong> "
+                     "The panel had no reference render and ruled on the fetched "
+                     "content alone, so the evidence is weaker than on pages with "
+                     "ground truth</li>"
                      % m["verdicts_on_gt_gap_pages"])
     H.append('<div class="fx-card"><ul>%s</ul></div>' % "".join(notes))
 
-    # 数据作 JS 字面量嵌入 —— `<script type="application/json">` 发布后不保留（§10.2）
+    # Data is embedded as a JavaScript literal: a `<script type="application/json">`
+    # block does not survive publishing, and the tables silently render empty.
     H.append("<script>window.FETCH_EVAL_DATA = %s;</script>"
              % json.dumps(agg, ensure_ascii=False))
     H.append("</div>")
@@ -704,7 +891,8 @@ def render_html(agg: dict, title: str = "Fetch 百页抓取实测") -> str:
 
 
 def _assert_table_columns(html: str) -> None:
-    """列数四方一致断言（playbook §8）。表头列数 != 数据行列数 = 报告在撒谎。"""
+    """Assert every table's header and its data rows agree on column count. A mismatch
+    misaligns the report while still rendering."""
     import re as _re
     for tbl in _re.findall(r"<table.*?</table>", html, _re.S):
         heads = _re.findall(r"<thead>(.*?)</thead>", tbl, _re.S)
@@ -714,7 +902,8 @@ def _assert_table_columns(html: str) -> None:
         n_head = heads[0].count("<th")
         for tr in _re.findall(r"<tr>(.*?)</tr>", bodies[0], _re.S):
             n = tr.count("<td")
-            assert n == n_head, "表格列数不一致：表头 %d，数据行 %d" % (n_head, n)
+            assert n == n_head, ("table column mismatch: header %d, data row %d"
+                                 % (n_head, n))
 
 
 def main() -> None:
@@ -724,8 +913,15 @@ def main() -> None:
     ap.add_argument("--out-md")
     ap.add_argument("--out-json")
     ap.add_argument("--out-html")
+    ap.add_argument("--run-meta",
+                    help="run_meta.json from the fetch round; defaults to the "
+                         "verdicts directory")
     a = ap.parse_args()
-    agg = aggregate(load_jsonl(Path(a.verdicts)), load_jsonl(Path(a.pageset)))
+    # Run parameters sit next to the verdicts; absent, the report simply omits the
+    # pacing caveat rather than inventing one.
+    meta_path = Path(a.run_meta) if a.run_meta else Path(a.verdicts).parent / "run_meta.json"
+    run_meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+    agg = aggregate(load_jsonl(Path(a.verdicts)), load_jsonl(Path(a.pageset)), run_meta)
     md = render_markdown(agg)
     if a.out_md:
         Path(a.out_md).write_text(md, encoding="utf-8")
@@ -739,7 +935,7 @@ def main() -> None:
     if a.out_html:
         html = render_html(agg)
         Path(a.out_html).write_text(html, encoding="utf-8")
-        print("HTML -> %s（%.2f MB，artifact 上限 2.44 MB）"
+        print("HTML -> %s (%.2f MB)"
               % (a.out_html, len(html.encode()) / 1e6))
 
 

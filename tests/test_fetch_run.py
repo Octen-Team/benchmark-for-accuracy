@@ -1,4 +1,4 @@
-"""runner 的续跑、抖动键、故障记录。全部打桩，不打真网络。"""
+"""Runner resume, repeat keys, and fault recording. Fully stubbed; no real network."""
 import json
 from pathlib import Path
 
@@ -36,9 +36,9 @@ def test_resumes_and_skips_done_pairs(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "get_fetcher", lambda n: _Stub(n))
     ps = _pageset(tmp_path)
     R.run(ps, ["a"], tmp_path / "run", concurrency=2)
-    out = R.run(ps, ["a"], tmp_path / "run", concurrency=2)     # 第二次应当全部跳过
+    out = R.run(ps, ["a"], tmp_path / "run", concurrency=2)     # everything should skip
     rows = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 3, "续跑重复写了行"
+    assert len(rows) == 3, "resume wrote duplicate rows"
 
 
 def test_bad_line_does_not_abort_the_run(tmp_path, monkeypatch):
@@ -52,7 +52,8 @@ def test_bad_line_does_not_abort_the_run(tmp_path, monkeypatch):
 
 
 def test_repeat_writes_distinct_run_seq(tmp_path, monkeypatch):
-    """抖动模式的键必须含 run_seq，否则续跑把第二轮当成已完成跳掉。"""
+    """The repeat key must include run_seq, or a resumed run skips the second round
+    as already done."""
     monkeypatch.setattr(R, "get_fetcher", lambda n: _Stub(n))
     out = R.run(_pageset(tmp_path), ["a"], tmp_path / "run", repeat=3, concurrency=2)
     rows = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines()]
@@ -63,7 +64,7 @@ def test_repeat_writes_distinct_run_seq(tmp_path, monkeypatch):
 def test_adapter_exception_is_recorded_as_harness_fault(tmp_path, monkeypatch):
     class Boom:
         def fetch(self, url, timeout=60):
-            raise RuntimeError("zyte: 缺少环境变量 ZYTE_API_KEY")
+            raise RuntimeError("zyte: missing environment variable ZYTE_API_KEY")
     monkeypatch.setattr(R, "get_fetcher", lambda n: Boom())
     out = R.run(_pageset(tmp_path, n=1), ["zyte"], tmp_path / "run")
     r = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
@@ -72,7 +73,8 @@ def test_adapter_exception_is_recorded_as_harness_fault(tmp_path, monkeypatch):
 
 
 def test_empty_content_is_not_retried(tmp_path, monkeypatch):
-    """HTTP 200 但内容为空是被测方的真实行为，重试等于把"取不到"洗成"取到了"。"""
+    """An HTTP 200 with an empty body is real behaviour of the system under test;
+    retrying would launder "could not retrieve" into "retrieved"."""
     calls = {"n": 0}
 
     class Empty:

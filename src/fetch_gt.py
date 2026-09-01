@@ -1,12 +1,15 @@
-"""GT 建库 —— 解析通道（非 HTML 文档）。
+"""Ground-truth construction — the parse channel, for non-HTML documents.
 
-docfmt 那 22 条是全场 GT 质量最好的一批：CSV 的 GT 就是那个 CSV，xlsx 的 GT 就是解析出的表。
-不需要浏览器、不需要 key，纯本地。
+The document pages carry the best ground truth in the set: the reference for a CSV is
+that CSV, the reference for a spreadsheet is the parsed sheet. No browser, no keys,
+entirely local.
 
-**本轮只评抓取能力**，所以解析器只负责把文档变成可比对的文本（供 coverage 用），
-不再产出结构计数 —— 表格/幻灯片保真属于解析质量，已从评价里删除。
+Because only fetch capability is scored, the parsers exist solely to turn a document
+into comparable text for the coverage check. They deliberately do not emit structure
+counts — table and slide fidelity is parsing quality, which is out of scope.
 
-解析失败一律返回规则名，不抛 —— 调用方要能区分"这页解析不了"和"我们的解析器崩了"。
+A parse failure always returns a rule name rather than raising, so the caller can tell
+"this page cannot be parsed" apart from "our parser crashed".
 """
 from __future__ import annotations
 
@@ -39,7 +42,7 @@ _CT_MAP = {
 
 
 def _import(name: str):
-    """单点 import，便于测试打桩成"依赖缺失"。"""
+    """Single import site, so tests can stub it out as a missing dependency."""
     try:
         return __import__(name)
     except ImportError:
@@ -47,16 +50,18 @@ def _import(name: str):
 
 
 def sniff_doc_type(raw: bytes, content_type: str, declared: str) -> tuple[str, str]:
-    """(doc_type, 规则名)。三级：魔数 > content-type > URL 声明。
+    """Return (doc_type, rule_name). Three levels: magic bytes > content-type > URL.
 
-    `arxiv.org/pdf/1706.03762` 没有后缀，`declared` 是 unknown，靠后两级定 —— 这道题
-    考的就是各家会不会认错。规则名逐条记录，事后能核是哪一级判出来的（playbook §9.3）。
+    A URL like `arxiv.org/pdf/1706.03762` has no suffix, so `declared` is unknown and the
+    later levels settle it — that page exists precisely to test whether a provider gets
+    this wrong. The rule name is recorded per page so it is always possible to check
+    which level made the call.
     """
     head = (raw or b"")[:8]
     for sig, kind in _MAGIC:
         if head.startswith(sig):
             if kind == "zip":
-                # docx/xlsx/pptx 都是 zip，光看魔数分不出来
+                # docx/xlsx/pptx are all zips; magic bytes alone cannot separate them
                 if declared in _ZIP_KINDS:
                     return declared, "declared_zip"
                 return "zip", "magic_bytes"
@@ -70,9 +75,10 @@ def sniff_doc_type(raw: bytes, content_type: str, declared: str) -> tuple[str, s
 
 
 def _table_md(rows: list[list]) -> tuple[str, int]:
-    """表格渲染成 Markdown 管道表，返回 (文本, 数据行数)。
+    """Render a table as a Markdown pipe table; returns (text, data row count).
 
-    表头 + 分隔行 + 数据行 —— checks 侧数管道行再减 2，两边对得上。
+    Header + separator + data rows, so a consumer counting pipe rows subtracts 2 and the
+    two sides agree.
     """
     if not rows:
         return "", 0
@@ -95,7 +101,8 @@ def _fail(doc_type: str, rule: str) -> dict:
 
 
 def parse_document(raw: bytes, doc_type: str, url: str) -> dict:
-    """把一份非 HTML 文档解析成 (Markdown 文本 + 结构计数)。**失败返回规则名，不抛。**"""
+    """Parse one non-HTML document into Markdown text. **Failure returns a rule name;
+    it never raises.**"""
     try:
         return _PARSERS.get(doc_type, _parse_text)(raw, doc_type)
     except Exception:                            # noqa: BLE001
@@ -171,7 +178,8 @@ def _parse_xlsx(raw: bytes, doc_type: str) -> dict:
                 if any(c is not None and str(c).strip() for c in r)]
         md, n = _table_md(rows)
         total += n
-        # sheets 只进明细表不进分数 —— 厂商的 markdown 不会带这个标记
+        # Sheet names go to the detail view only, never the score: provider markdown
+        # does not carry this marker.
         blocks.append("## Sheet: %s\n%s" % (ws.title, md))
     return _ok("\n\n".join(blocks),
                {"sheets": len(wb.worksheets), "rows": total}, doc_type)
@@ -206,7 +214,7 @@ _PARSERS = {
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 浏览器通道：HTML 页的 GT
+# Browser channel: ground truth for HTML pages
 # ══════════════════════════════════════════════════════════════════════════
 
 from collections import Counter                                    # noqa: E402
@@ -214,8 +222,9 @@ from collections import Counter                                    # noqa: E402
 from .fetch_checks import tokenize                                 # noqa: E402
 from .fetch_spec import TH                                         # noqa: E402
 
-# 排除这些子树之后剩下的是正文；被排除的那部分恰好就是样板词的来源。
-# **精度口径的分母由此而来** —— 比链接密度启发式硬得多。
+# What remains after excluding these subtrees is the body text; the excluded part is
+# exactly where the boilerplate vocabulary comes from. Splitting the page structurally
+# is far more reliable than a link-density heuristic.
 _CHANNELS = frozenset({"playwright_headless", "chrome_real"})
 
 BOILER_SELECTORS = ("nav", "header", "footer", "aside", "[role=navigation]",
@@ -234,7 +243,7 @@ more most other some such only own same so than too very s t don now
 
 
 def _playwright():
-    """单点 import，测试据此跳过。"""
+    """Single import site; tests skip on it."""
     try:
         from playwright.sync_api import sync_playwright
         return sync_playwright
@@ -243,7 +252,8 @@ def _playwright():
 
 
 def _content_terms(text: str, exclude: set[str], cap: int) -> list[str]:
-    """按词频取内容词：去停用词、去单字符拉丁、去 exclude 集合。"""
+    """Pick content terms by frequency: drop stopwords, single Latin characters, and
+    anything in the exclude set."""
     freq = Counter(t for t in tokenize(text)
                    if t not in _STOP and t not in exclude
                    and (len(t) >= 2 or not t.isascii()))
@@ -251,24 +261,29 @@ def _content_terms(text: str, exclude: set[str], cap: int) -> list[str]:
 
 
 def derive_vocab(main_text: str, boiler_text: str) -> dict:
-    """产出内容词表（成功闸门的分母）。样板词表只作排除集，不是指标。
+    """Produce the content vocabulary — the denominator of the success gate. The
+    boilerplate vocabulary is only an exclusion set, never a metric.
 
-    尾部词取正文末 10%，喂 `oversize` 的截断检查 —— 静默截断在 coverage 口径下照样是
-    pass，只要词表落在前半。
+    Tail terms come from the last 10% of the body and feed the `oversize` truncation
+    check: silent truncation still passes a coverage gate as long as the vocabulary
+    falls in the retained half.
     """
-    # **样板词的判据是"在样板侧比在正文侧更常见"，不是"在样板侧出现过"。**
-    # docs.python.org 的侧边栏目录列出了全部章节名，而那些恰恰是这页最核心的内容词
-    # （task / coroutines / cancellation）。只要"出现过"就排除，召回的分母就丢了
-    # 最该考的那些词 —— 比 noise_ratio 变糊严重得多。
+    # **A term counts as boilerplate when it is MORE common in the chrome than in the
+    # body — not merely when it appears in the chrome.** A documentation sidebar lists
+    # every section name, and those are exactly the page's most central content terms.
+    # Excluding on mere appearance would strip the recall denominator of the very words
+    # the check exists to look for.
     main_freq = Counter(t for t in tokenize(main_text) if t not in _STOP)
     boiler_freq = Counter(t for t in tokenize(boiler_text) if t not in _STOP)
     boiler_only = {t for t, n in boiler_freq.items() if n >= main_freq.get(t, 0)}
     boiler = _content_terms(boiler_text, set(boiler_freq) - boiler_only, VOCAB_CAP)
     vocab = _content_terms(main_text, boiler_only, VOCAB_CAP)
     toks = tokenize(main_text)
-    # **身份锚点要从文档开头取**：全局罕见词会挑到表格深处的值（arxiv 那篇论文挑出了
-    # wsj / 38 / pad），那是**完整度**标记不是**身份**标记 —— 抽到了正确的论文但表格
-    # 没抽全的家会被判成"返回错页"。"这是不是这一页"看开头就能答。
+    # **Identity anchors must come from the start of the document.** Globally rare terms
+    # select values buried deep in tables, which mark *completeness*, not *identity*: a
+    # provider that fetched the correct paper but did not extract every table row would
+    # then be judged as having returned the wrong page. "Is this that page?" is
+    # answerable from the opening.
     head_src = toks[:max(200, int(len(toks) * 0.1))]
     head = _content_terms(" ".join(head_src), boiler_only, VOCAB_CAP)
     return {"vocab": vocab, "vocab_n": len(vocab),
@@ -277,23 +292,25 @@ def derive_vocab(main_text: str, boiler_text: str) -> dict:
 
 
 def gt_is_walled(main_text: str, title: str) -> list[str]:
-    """GT 自己是不是一堵墙。
+    """Is the ground truth itself a wall?
 
-    浏览器架构上就是 Firecrawl / Zyte 卖的东西，防守页它也会吃拦截。渲染"成功"且有
-    词表并不等于拿到了内容 —— w3.org/TR/html52/ 实测建出来的 GT 标题是 "Just a moment..."，
-    整页词表是 Cloudflare 验证页的文案，于是全场五家都在跟一张验证页比对。
-    只在"词表为空"时标缺口兜不住这一类（设计文档 二.4）。
+    Our browser is architecturally the same thing the unblocking vendors sell, so it gets
+    challenged on defended pages too. A render that "succeeded" and produced a vocabulary
+    is not proof the content arrived: a challenge screen renders perfectly well, and its
+    text becomes the vocabulary. Every provider is then compared against a challenge
+    page. Flagging a gap only when the vocabulary is empty does not catch this.
     """
     from .fetch_checks import wall_hit
     return sorted(set(wall_hit(main_text) + wall_hit(title or "")))
 
 
 def derive_strength(headless_ok: bool | None, chrome_ok: bool | None) -> str:
-    """防护强度是两条 GT 通道的免费副产品（设计文档 §1.4）。
+    """Protection strength falls out of the two ground-truth channels for free.
 
-    **两条通道各自"没跑过"都要落到 unknown，不能当成"跑了但失败"。**
-    默认 hard 会把"没测"伪装成"测出来最难"；而把缺失的 headless 当成 False，会让
-    "只跑过真 Chrome 且成功"的页判成 medium —— 那同样是凭空造出来的结论。
+    **If either channel was not run, the result is `unknown` — never "ran and failed".**
+    Defaulting to hard disguises "not measured" as "measured, hardest". Treating a
+    missing headless result as False is the same mistake in the other direction: a page
+    where only real Chrome ran, and succeeded, would be labelled medium on no evidence.
     """
     if headless_ok:
         return "soft"
@@ -311,8 +328,9 @@ _JS_EXTRACT = """
   sels.forEach(s => { try { doc.querySelectorAll(s).forEach(n => boilerNodes.push(n)); }
                       catch (e) {} });
   const boilerText = boilerNodes.map(n => n.innerText || '').join('\\n');
-  // 临时隐藏样板节点，在**活文档**上取 innerText —— 克隆节点没有布局，
-  // innerText 会退化成 textContent，把 <style> 里的 CSS 也算成正文。
+  // Temporarily hide the chrome and read innerText from the **live document**. A cloned
+  // node has no layout, so innerText degrades to textContent and CSS inside <style>
+  // would be counted as body text.
   const prev = boilerNodes.map(n => n.style.display);
   boilerNodes.forEach(n => { n.style.display = 'none'; });
   const mainText = doc.body.innerText || '';
@@ -325,17 +343,20 @@ _JS_EXTRACT = """
 def render_page(url: str, *, channel: str = "playwright_headless",
                 timeout: int = 45, screenshot_dir: str | None = None,
                 pid: str = "page") -> dict:
-    """渲染一页并取 GT。**干净 profile、不登录、只接 cookie。**
+    """Render one page and derive its ground truth. **Clean profile, never signed in,
+    cookies accepted only.**
 
-    用已登录会话建 GT，登录墙页的 GT 就包含任何 provider 都拿不到的内容，
-    然后全场对着一份谁都达不到的答案一起失败 —— 那不是在量 provider（设计文档 §〇.6）。
+    Building ground truth from a signed-in session would put content behind the login
+    wall into the reference, and every provider would then fail against an answer none of
+    them can reach. That measures our session, not the providers.
     """
     sync_playwright = _playwright()
     if sync_playwright is None:
-        return {"error": "playwright 未安装", "rule": "dep_missing"}
+        return {"error": "playwright is not installed", "rule": "dep_missing"}
     if channel not in _CHANNELS:
-        raise ValueError("未知通道 %r，可选 %s" % (channel, sorted(_CHANNELS)))
-    budget = timeout * 2 + 30          # 导航 + 滚动 + 截图，留足再加一倍余量
+        raise ValueError("unknown channel %r; expected one of %s"
+                         % (channel, sorted(_CHANNELS)))
+    budget = timeout * 2 + 30          # navigation + scroll + screenshot, with headroom
     try:
         with _watchdog(budget):
             got = _render_once(sync_playwright, url, channel, timeout,
@@ -344,8 +365,9 @@ def render_page(url: str, *, channel: str = "playwright_headless",
         return {"channel": channel, "url": url, "rule": "render_failed",
                 "error": str(e), "main_text": "", "boiler_text": ""}
     if got.get("rule") == "render_failed" and "ERR_HTTP2" in (got.get("error") or ""):
-        # 有些站的 HTTP/2 实现和 chromium 谈不拢（bestbuy / noon 实测）。关掉 H2 重试
-        # 一次再下结论 —— 不重试的话"协议谈不拢"会被记成"这页抓不到"。
+        # Some sites' HTTP/2 implementations fail to negotiate with chromium. Retry once
+        # with H2 disabled before concluding anything, or a protocol negotiation failure
+        # gets recorded as "this page could not be fetched".
         try:
             with _watchdog(budget):
                 got = _render_once(sync_playwright, url, channel, timeout,
@@ -359,16 +381,17 @@ def render_page(url: str, *, channel: str = "playwright_headless",
 
 @contextmanager
 def _watchdog(seconds: int):
-    """硬看门狗。**Playwright 的 timeout 只管单个操作**，页面在浏览器进程里挂住时
-    整轮会无限期堵死 —— 真 Chrome 跑反爬页时实测卡了 20 分钟一行没落盘。
-    只在主线程生效（SIGALRM 的限制），浏览器通道本来就是顺序跑的。
+    """A hard watchdog. **Playwright timeouts cover individual operations only**; when a
+    page hangs inside the browser process the whole round blocks indefinitely, producing
+    no rows at all. Main thread only (a SIGALRM limitation), which is fine because the
+    browser channel runs sequentially anyway.
     """
     if seconds <= 0 or threading.current_thread() is not threading.main_thread():
         yield
         return
 
     def _boom(signum, frame):
-        raise TimeoutError("render 看门狗触发：单页超过 %ds" % seconds)
+        raise TimeoutError("render watchdog fired: one page exceeded %ds" % seconds)
 
     old = signal.signal(signal.SIGALRM, _boom)
     signal.alarm(seconds)
@@ -384,12 +407,14 @@ def _render_once(sync_playwright, url: str, channel: str, timeout: int,
     import json as _j
     out: dict = {"channel": channel, "url": url}
     with sync_playwright() as p:
-        # **channel 必须真的改变启动方式。** 之前这里写死 headless=True，`chrome_real`
-        # 只是个传着好看的参数 —— 那条命令会静默跑成 headless 却声称用了真 Chrome，
-        # 而反爬页的整个意义就在于真实浏览器指纹。
+        # **The channel must genuinely change how the browser launches.** With
+        # `headless=True` hard-coded, a real-Chrome channel would be a decorative
+        # argument: the command silently runs headless while claiming a real browser,
+        # and a real browser fingerprint is the entire point on defended pages.
         if channel == "chrome_real":
-            # 本机装的 Google Chrome，有头、真实指纹、**干净 profile 不登录**
-            # （用登录态建 GT 等于让全场对着一份谁都拿不到的答案一起失败）
+            # The locally installed Google Chrome: headed, real fingerprint, **clean
+            # profile, never signed in** (a signed-in profile would build ground truth
+            # no provider can reach).
             browser = p.chromium.launch(headless=False, channel="chrome", args=args)
         else:
             browser = p.chromium.launch(headless=True, args=args)
@@ -409,9 +434,10 @@ def _render_once(sync_playwright, url: str, channel: str, timeout: int,
             out["title"] = data["title"]
             out["rule"] = "rendered"
             if screenshot_dir:
-                # **截图单独兜底。** 截图失败不该拖垮已经取到的正文 —— hub.docker.com
-                # 实测 http=200、正文正常，只是 captureScreenshot 报协议错，
-                # 结果整页 GT 被丢掉了。
+                # **The screenshot has its own fallback.** A screenshot failure must not
+                # discard body text that was already retrieved: a page can return 200
+                # with perfectly good text while captureScreenshot raises a protocol
+                # error, and without this the whole page's ground truth would be lost.
                 try:
                     import os as _os
                     _os.makedirs(screenshot_dir, exist_ok=True)
@@ -427,13 +453,14 @@ def _render_once(sync_playwright, url: str, channel: str, timeout: int,
             for closer in (ctx.close, browser.close):
                 try:
                     closer()
-                except Exception:                # noqa: BLE001  看门狗触发时 close 也可能挂
+                except Exception:                # noqa: BLE001  close can hang too
                     pass
     return out
 
 
 def _scroll_to_bottom(page, rounds: int = 3, quiet_ms: int = 2000) -> None:
-    """滚到底触发懒加载。**有确定的停止条件**：高度不再增长或轮数用尽。"""
+    """Scroll to the bottom to trigger lazy loading. **Definite stopping condition:**
+    the height stops growing, or the round budget runs out."""
     last = 0
     for _ in range(rounds):
         page.mouse.wheel(0, 20000)
@@ -449,16 +476,20 @@ def _scroll_to_bottom(page, rounds: int = 3, quiet_ms: int = 2000) -> None:
 
 def derive_anchors(title: str, vocab: list[str], df: dict[str, int],
                    n_pages: int, cap: int = 6, url: str = "") -> list[str]:
-    """页面独有锚点：标题实词 + 在全集里罕见的内容词。
+    """Anchors distinctive to one page: content words from the title plus terms that are
+    rare across the whole set.
 
-    只有 100 页语料，"独有"判不准，所以用"在这 100 页里出现在少于 20% 的页上"当近似。
-    这一处已知不完美，写进了设计文档的开放项。
+    With a corpus of only a hundred pages, true distinctiveness cannot be established, so
+    document frequency across the set stands in as an approximation. This is a known
+    limitation.
     """
-    # 文档频率门限收到 5%。两成在 58 页语料上是 11 页 —— 而集合里 PDF 才 8 个，
-    # "pdf" 就这么混进了锚点。锚点虚高不会造出假 lost（方向是安全的），但会让
-    # "返回错页"这条硬否决形同虚设：返回另一份 IRS 表格照样命中 line/see/tax。
+    # The document-frequency threshold is tightened to 5%. At 20%, a term appearing on a
+    # tenth of the corpus still qualifies, so a common format word slips into the anchors.
+    # Loose anchors do not manufacture false losses — that direction is safe — but they
+    # hollow out the wrong-page veto: returning a *different* form from the same agency
+    # would still hit generic terms like line/see/tax.
     lim = max(1, int(n_pages * 0.05))
-    # URL 末段是最强的身份信号（f1040 / rfc2616 / asyncio-task），优先于标题与词表
+    # The last URL segment is the strongest identity signal, ahead of title and vocabulary
     slug_src = re.sub(r"[^a-z0-9]+", " ", (url or "").lower().rsplit("/", 2)[-1])
     out = [t for t in _content_terms(slug_src, set(), 4) if df.get(t, 0) <= lim]
     for t in _content_terms(title or "", set(), 6):

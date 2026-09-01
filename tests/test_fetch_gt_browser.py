@@ -1,8 +1,10 @@
-"""GT 浏览器通道：词表导出、防护强度导出、形态多数决、真实渲染。
+"""Ground-truth browser channel: vocabulary derivation, strength derivation, and real
+rendering.
 
-`derive_vocab` 是这套评测的地基 —— 它同时产出两个分母：
-  vocab         成功闸门的分母（coverage）
-  boiler_terms  不是指标，只作 vocab 的排除集 —— 把导航词剔掉，让覆盖率量的是真正文。
+`derive_vocab` is the foundation of this evaluation — it produces two denominators:
+  vocab         the denominator of the success gate (coverage)
+  boiler_terms  not a metric; only an exclusion set for vocab, so that removing
+                navigation terms leaves coverage measuring the actual body.
 """
 import importlib.util
 
@@ -12,7 +14,7 @@ from src import fetch_gt as G
 
 needs_playwright = pytest.mark.skipif(
     importlib.util.find_spec("playwright") is None,
-    reason="playwright 未安装（requirements-fetch.txt 可选依赖）")
+    reason="playwright is not installed (optional, see requirements-fetch.txt)")
 
 HTML = """
 <html><body>
@@ -33,7 +35,7 @@ class TestDeriveVocab:
     def test_boilerplate_terms_never_enter_the_content_vocab(self):
         v = G.derive_vocab("toroidal flux home about", "home about careers")
         assert "toroidal" in v["vocab"] and "flux" in v["vocab"]
-        assert "home" not in v["vocab"], "同时出现在样板里的词不算内容词"
+        assert "home" not in v["vocab"], "a term that also appears in the chrome is not content"
         assert "home" in v["boiler_terms"]
 
     def test_two_denominators_are_disjoint(self):
@@ -48,7 +50,7 @@ class TestDeriveVocab:
 
     def test_short_page_keeps_all_and_reports_a_small_n(self):
         v = G.derive_vocab("alpha beta gamma", "")
-        assert v["vocab_n"] == 3, "退化页要如实报小 n，下游据此跳过机械阈值"
+        assert v["vocab_n"] == 3, "a degenerate page reports its small n honestly, so downstream skips the mechanical threshold"
 
     def test_stopwords_are_dropped(self):
         v = G.derive_vocab("the quick brown fox and the lazy dog", "")
@@ -68,14 +70,15 @@ class TestStrength:
         assert G.derive_strength(False, False) == "hard"
 
     def test_headless_never_run_is_unknown_not_medium(self):
-        """把缺失的 headless 当成 False，会让"只跑过真 Chrome 且成功"的页判成 medium
-        —— 那和默认 hard 一样是凭空造结论。"""
+        """Treating a missing headless result as False would label a page medium when
+        only real Chrome ran — the same invention as defaulting to hard."""
         assert G.derive_strength(None, True) == "unknown"
         assert G.derive_strength(None, False) == "unknown"
         assert G.derive_strength(None, None) == "unknown"
 
     def test_chrome_channel_not_run_is_unknown_not_hard(self):
-        """默认 hard 会把"没测"伪装成"测出来最难"，那是凭空给防护强度添了一档。"""
+        """Defaulting to hard disguises "not measured" as "measured, hardest", inventing
+        a tier that was never established."""
         assert G.derive_strength(False, None) == "unknown"
         assert G.derive_strength(True, None) == "soft"
 
@@ -89,7 +92,7 @@ class TestRenderPage:
         main, boiler = got["main_text"].lower(), got["boiler_text"].lower()
         assert "toroidal" in main and "manifold" in main
         assert "careers" in boiler and "copyright" in boiler
-        assert "careers" not in main, "nav 子树必须排除干净，否则精度的分母是假的"
+        assert "careers" not in main, "the nav subtree must be excluded, or the denominator is false"
 
     def test_struct_counts_are_recorded(self, tmp_path):
         f = tmp_path / "page.html"
@@ -112,7 +115,7 @@ class TestAnchors:
                              ["toroidal", "manifold", "lattice"],
                              {"toroidal": 1, "manifold": 1, "lattice": 40}, 100)
         assert "toroidal" in a and "manifold" in a
-        assert "lattice" not in a, "在 40% 的页上都出现的词不是独有锚点"
+        assert "lattice" not in a, "a term on 40% of pages is not a distinctive anchor"
 
     def test_stopwords_never_become_anchors(self):
         a = G.derive_anchors("The Page", ["the", "and", "toroidal"], {}, 100)
@@ -123,7 +126,8 @@ class TestAnchors:
         assert G.derive_anchors("", [], {}, 100) == []
 
     def test_generic_title_words_are_filtered_by_document_frequency(self):
-        """解析通道把文件名当标题，pdf / txt 这类通用词会白送命中，同一性检查虚高。"""
+        """The parse channel uses the filename as the title, so format words would be
+        free hits and the identity check would read as stronger than it is."""
         a = G.derive_anchors("f1040 pdf", ["tax", "instructions"],
                              {"pdf": 40, "f1040": 1, "tax": 2, "instructions": 3}, 100)
         assert "pdf" not in a
@@ -136,7 +140,8 @@ class TestAnchors:
         assert "asyncio" in a and "task" in a
 
     def test_document_frequency_limit_is_five_percent(self):
-        """两成在 58 页语料上是 11 页 —— 出现在 8 个页面上的 pdf 一点也不独有。"""
+        """A threshold of 20% keeps terms appearing on a tenth of the corpus, which are
+        not distinctive at all."""
         df = {"pdf": 8, "rare": 1}
         a = G.derive_anchors("pdf rare", [], df, 58)
         assert "pdf" not in a and "rare" in a
@@ -144,8 +149,8 @@ class TestAnchors:
 
 class TestWalledGt:
     def test_a_challenge_page_is_detected(self):
-        """w3.org 实测：headless 被 Cloudflare 拦，GT 标题是 Just a moment...，
-        整页词表是验证页文案，于是全场都在跟一张验证页比对。"""
+        """When headless is blocked, the ground-truth title is the challenge screen and
+        the whole vocabulary is its copy, so every provider is compared against it."""
         assert G.gt_is_walled("Verifying you are human. This may take a few seconds.",
                               "Just a moment...")
 
@@ -163,7 +168,7 @@ class TestVocabHead:
                + " omega finis"
         v = G.derive_vocab(main, "")
         assert "alpha" in v["vocab_head"] and "beta" in v["vocab_head"]
-        assert "omega" not in v["vocab_head"], "尾部词不该进身份锚点的来源"
+        assert "omega" not in v["vocab_head"], "tail terms must not seed identity anchors"
 
     def test_head_and_tail_are_both_present(self):
         v = G.derive_vocab(" ".join("w%03d" % i for i in range(300)), "")
@@ -177,9 +182,9 @@ class TestVocabHead:
 class TestChannelIsNotDecorative:
     @needs_playwright
     def test_unknown_channel_hard_fails(self):
-        """channel 写错了要炸，不能悄悄跑成 headless。"""
+        """A misspelt channel must fail loudly, not quietly run headless."""
         import pytest as _p
-        with _p.raises(ValueError, match="未知通道"):
+        with _p.raises(ValueError, match="unknown channel"):
             G.render_page("https://example.com/", channel="real_chrome")
 
     def test_declared_channels(self):
@@ -190,7 +195,7 @@ class TestWatchdog:
     def test_watchdog_fires_on_a_hang(self):
         import time
         import pytest as _p
-        with _p.raises(TimeoutError, match="看门狗"):
+        with _p.raises(TimeoutError, match="watchdog"):
             with G._watchdog(1):
                 time.sleep(3)
 
@@ -198,7 +203,7 @@ class TestWatchdog:
         import signal
         with G._watchdog(5):
             pass
-        assert signal.alarm(0) == 0, "闹钟没解除，会在后面的代码里乱炸"
+        assert signal.alarm(0) == 0, "an un-cleared alarm fires later, elsewhere"
 
     def test_zero_seconds_disables_it(self):
         with G._watchdog(0):

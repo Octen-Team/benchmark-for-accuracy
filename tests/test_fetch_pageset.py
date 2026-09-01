@@ -1,6 +1,7 @@
-"""CSV -> 页面集的机械转写。重点在两处容易算错的地方：
-   expect  404/503 的正确行为是干净报错，不是返回内容；
-   doc_type  URL 断不定的必须留 unknown，猜一个就把"考嗅探"那道题做废了。
+"""Mechanical transcription from CSV to page set. Two places are easy to get wrong:
+   expect    the correct behaviour for 404/503 is a clean error, not content;
+   doc_type  anything the URL cannot settle must stay unknown — guessing defeats
+             the sniffing test entirely.
 """
 import json
 import subprocess
@@ -78,13 +79,15 @@ def test_host_dup_marks_repeated_domains(tmp_path):
 
 
 def test_the_language_axis_is_gone(tmp_path):
-    """语种轴不在报告的六个维度里，已整条删除 —— 页面集也不该再带这个字段。"""
+    """The language axis is not a reported dimension and was removed; the page set
+    must not carry the field either."""
     rows = _build(tmp_path)
     assert all("lang" not in r for r in rows)
 
 def test_probes_union_when_two_labels_match(tmp_path):
-    """gutenberg 同时命中 oversize 与 raw_direct —— 后一条不能覆盖前一条。"""
-    from src.fetch_spec import PAGE_LABELS  # noqa: F401  确保标签表已就位
+    """One page carries both oversize and raw_direct — the second must not overwrite
+    the first."""
+    from src.fetch_spec import PAGE_LABELS  # noqa: F401  ensure the label table loaded
     from scripts.fetch_pageset_build import label_for
     lab = label_for("https://www.gutenberg.org/files/1342/1342-0.txt")
     assert set(lab["probes"]) == {"oversize", "raw_direct"}
