@@ -348,51 +348,62 @@ class TestWeakAnchors:
         assert "just" not in u.split("FETCH UNDER TEST")[0].lower()
 
 
-class TestCrossPanel:
-    def _resps(self):
-        return {"octen": {"status": "ok", "text": "alpha " * 60},
-                "exa": {"status": "ok", "text": "beta " * 60},
-                "tavily": {"status": "error", "failure_reason": "anti_bot_blocked",
-                           "text": ""}}
+class TestProviderSelfReport:
+    """Some providers classify the page they fetched. That label is evidence about
+    honesty, and the flag consumes it — as evidence, never as a score."""
 
-    def test_provider_names_never_reach_the_model(self):
-        """Brand priors would leak into the verdict, and these are exactly the pages
-        where only the content should count."""
-        u, lab = S.cross_user(page(), self._resps())
-        assert not any(n in u for n in ("octen", "exa", "tavily"))
-        assert set(lab.values()) == {"octen", "exa", "tavily"}
+    def _page(self, **kw):
+        return {"pid": "p1", "url": "https://h.com/a", "type": "baseline",
+                "expect": "content", "gt": {}, **kw}
 
-    def test_label_order_is_stable_per_page_but_varies_across_pages(self):
-        provs = ["a", "b", "c", "d"]
-        assert S._cross_order("p001", provs) == S._cross_order("p001", list(reversed(provs)))
-        assert S._cross_order("p001", provs) != S._cross_order("p002", provs)
+    def _resp(self, label, n=500):
+        return {"text": "x" * n, "raw_meta": {"page_structure": label}}
 
-    def test_serp_context_is_included_when_available(self):
-        p = page(gt={"gt_gap": True, "anchor_source": "serp", "anchors": ["x"],
-                     "serp_title": "The Real Title", "serp_snippet": "a snippet"})
-        u, _ = S.cross_user(p, self._resps())
-        assert "The Real Title" in u and "a snippet" in u
+    def test_an_index_label_on_a_passing_cell_proves_nothing(self):
+        """Plenty of URLs genuinely are listings. Firing on the label alone would flag a
+        perfectly good extraction of a category page as dishonest."""
+        assert S.self_report_says_not_the_page(
+            self._page(), self._resp("Index Page", 50000), "pass") is False
 
-    def test_rubric_defaults_to_lost(self):
-        """Judging without a reference is lenient, so the prompt demands a failure
-        verdict in the absence of positive evidence."""
-        assert "Default to `lost`" in S.CROSS_SYSTEM
-        assert "Length is not evidence" in S.CROSS_SYSTEM
+    def test_an_index_label_corroborates_a_cell_already_judged_lost(self):
+        assert S.self_report_says_not_the_page(
+            self._page(), self._resp("Index Page"), "lost") is True
 
-    def test_cache_key_tracks_every_providers_text(self):
-        a = S.cross_cache_key(page(), self._resps(), "m")
-        changed = {**self._resps(), "exa": {"status": "ok", "text": "gamma " * 60}}
-        assert S.cross_cache_key(page(), changed, "m") != a
+    def test_no_main_content_stands_on_its_own_when_the_body_is_small(self):
+        assert S.self_report_says_not_the_page(
+            self._page(), self._resp("No Main Content"), "pass") is True
 
-    def test_cross_merges_per_provider_majority(self, monkeypatch):
-        def fake(system, user, model, **kw):
-            _, lab = S.cross_user(page(), self._resps())
-            inv = {v: k for k, v in lab.items()}
-            return {"verdicts": {inv["octen"]: {"verdict": "pass"},
-                                 inv["exa"]: {"verdict": "lost"},
-                                 inv["tavily"]: {"verdict": "lost"}}}
-        monkeypatch.setattr("src.llm.call_llm_json", fake)
-        out = S.panel_cross(page(), self._resps(), ["m1", "m2", "m3"])
-        assert out["octen"]["verdict"] == "pass"
-        assert out["exa"]["verdict"] == "lost"
-        assert all(v["mode"] == "cross" for v in out.values())
+    def test_a_long_body_outweighs_a_no_main_content_label(self):
+        """The label is a measured false negative on substantial articles; trusting it
+        there would mark a real retrieval dishonest."""
+        assert S.self_report_says_not_the_page(
+            self._page(), self._resp("No Main Content", S.SELF_REPORT_OVERRIDE_LEN + 1),
+            "pass") is False
+
+    def test_a_normal_label_is_never_evidence(self):
+        assert S.self_report_says_not_the_page(
+            self._page(), self._resp("Content Page"), "lost") is False
+
+    def test_providers_that_ship_no_label_are_unaffected(self):
+        """Only some providers expose this. Absence must never read as a bad label."""
+        assert S.self_report_says_not_the_page(self._page(), {"text": "x" * 500},
+                                               "lost") is False
+        assert S.self_report_says_not_the_page(
+            self._page(), {"text": "x" * 500, "raw_meta": {}}, "lost") is False
+
+    def test_an_empty_return_presents_nothing_so_cannot_be_dishonest(self):
+        assert S.self_report_says_not_the_page(
+            self._page(), {"text": "", "raw_meta": {"page_structure": "Index Page"}},
+            "lost") is False
+
+    def test_pages_that_should_error_are_out_of_scope(self):
+        assert S.self_report_says_not_the_page(
+            self._page(expect="error"), self._resp("No Main Content"), "lost") is False
+
+    def test_the_label_flags_honesty_and_never_moves_a_verdict(self):
+        page = self._page(gt={"vocab": ["alpha", "beta"], "anchors": ["alpha"]})
+        resp = {"text": "alpha beta " * 40, "status": "ok",
+                "raw_meta": {"page_structure": "No Main Content"}}
+        out = S.score_one(page, resp, panel=None)
+        assert out["verdict"] == "pass", "self-report must not set verdicts"
+        assert out["dishonest"] is True

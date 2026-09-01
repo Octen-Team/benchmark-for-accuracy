@@ -69,9 +69,13 @@ PROBES = frozenset({"oversize", "url_quirk", "raw_direct", "redirect",
 # `fault` exists so that failures caused by the harness itself — our own size cap, our
 # own crashed normalizer, an expired key — can be reported separately instead of being
 # charged to the provider. Without that column those show up as provider weakness.
+# `timeout_upstream` and `target_unreachable` are deliberately separate. The first is our
+# own connection to the provider failing — a delivery problem, worth retrying. The second
+# is the provider answering "I tried and could not reach the target": that is its result,
+# and retrying it would launder "could not retrieve" into "retrieved".
 FAILURE_REASONS = ("nothing_extractable", "anti_bot_blocked", "other", "our_size_cap",
-                   "timeout_upstream", "rate_limited", "normalizer_crashed",
-                   "content_type_or_404", "blocklisted_domain")
+                   "timeout_upstream", "target_unreachable", "rate_limited",
+                   "normalizer_crashed", "content_type_or_404", "blocklisted_domain")
 FAULTS = ("harness", "provider", "page")
 
 
@@ -184,4 +188,4 @@ assert len(_PAYWALL) == 6
 assert len(_WAF) == 25, "the 32 Defended rows span 31 hosts (reddit twice), minus 6 paywalls"
 assert len(ANTIBOT_SUBCLASS) == len(_LOGIN_WALL) + len(_PAYWALL) + len(_WAF), \
     "a host appears in more than one sub-class list"
-assert len(FAILURE_REASONS) == 9 and len(set(FAILURE_REASONS)) == 9
+assert len(FAILURE_REASONS) == 10 and len(set(FAILURE_REASONS)) == 10

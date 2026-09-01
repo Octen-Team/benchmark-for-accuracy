@@ -70,12 +70,8 @@ def _slice(rows, providers, keyfn, gapped: set | None = None):
     for bucket, rs in _by([r for r in rows if keyfn(r) is not None], keyfn).items():
         b = {p: weighted([x["verdict"] for x in rs if x["provider"] == p])
              for p in providers}
-        # **A human-verified cell is not low-confidence.** These start as the weakest
-        # evidence in the set and become the strongest once reviewed. Without excluding
-        # them the warning never clears and the review work counts for nothing.
-        weak = [r for r in rs if r["pid"] in gapped and r.get("reason") != "human_gold"]
+        weak = [r for r in rs if r["pid"] in gapped]
         b["_gap_share"] = (len(weak) / len(rs)) if rs else 0.0
-        b["_human_verified"] = sum(1 for r in rs if r.get("reason") == "human_gold")
         b["_n_pages"] = len({r["pid"] for r in rs})
         buckets[bucket] = b
     return buckets
@@ -231,10 +227,8 @@ def aggregate(verdicts: list[dict], pages: list[dict],
         rs = [r for r in base if r["pid"] in pids]
         probe_b[probe] = {p: weighted([r["verdict"] for r in rs if r["provider"] == p])
                           for p in providers}
-        _weak = [r for r in rs if r["pid"] in gapped and r.get("reason") != "human_gold"]
+        _weak = [r for r in rs if r["pid"] in gapped]
         probe_b[probe]["_gap_share"] = (len(_weak) / len(rs)) if rs else 0.0
-        probe_b[probe]["_human_verified"] = sum(1 for r in rs
-                                                if r.get("reason") == "human_gold")
         probe_b[probe]["_n_pages"] = len(pids)
     slices["probes"] = probe_b
 
@@ -303,9 +297,7 @@ def aggregate(verdicts: list[dict], pages: list[dict],
                                             for p in ab)),
             "unjudged_total": sum(d["unjudged"] for d in diag.values()),
             "verdicts_on_gt_gap_pages": sum(
-                1 for v in base if (pmap[v["pid"]].get("gt") or {}).get("gt_gap")
-                and v.get("reason") != "human_gold"),
-            "human_verified": sum(1 for v in base if v.get("reason") == "human_gold"),
+                1 for v in base if (pmap[v["pid"]].get("gt") or {}).get("gt_gap")),
             "cache_pinned": _cache_states(providers),
             # Rounds: how many, how many cells disagreed across them, and the best/worst
             # envelope of the headline. With the envelope reported, a reader can tell
@@ -593,9 +585,11 @@ def render_markdown(agg: dict) -> str:
                     "; ".join("%s %s-%s" % (p, _fmt(e["worst"]), _fmt(e["best"]))
                               for p, e in sorted(env.items()))))
     else:
-        L.append("- **Only one round was run**, so the headline carries the full "
-                 "round-to-round variance of a single sample. On defended pages that is "
-                 "substantial; use `--repeat` before comparing providers.")
+        L.append("- **One round.** On defended pages a provider's result can vary "
+                 "between calls, so this score carries that variance: providers a few "
+                 "points apart are not separated by it. `--repeat N` scores the per-cell "
+                 "median and prints the envelope when a close ordering has to be "
+                 "settled.")
     L.append("- Latency counts only calls that returned content. Median length is "
              "comparable across rounds for one provider, and for reference only across "
              "providers")
@@ -866,10 +860,11 @@ def render_html(agg: dict, title: str = "Fetch provider capability") -> str:
                         "; ".join("%s %s&ndash;%s" % (p, _fmt(e["worst"]), _fmt(e["best"]))
                                   for p, e in sorted(env.items()))))
     else:
-        notes.append("<li><strong>Only one round was run</strong>, so the headline "
-                     "carries the full round-to-round variance of a single sample. On "
-                     "defended pages that is substantial; use <code>--repeat</code> "
-                     "before comparing providers.</li>")
+        notes.append("<li><strong>One round.</strong> On defended pages a provider's "
+                     "result can vary between calls, so this score carries that "
+                     "variance: providers a few points apart are not separated by it. "
+                     "<code>--repeat N</code> scores the per-cell median and prints the "
+                     "envelope when a close ordering has to be settled.</li>")
     notes.append("<li>%d cells could not be judged; left genuinely unjudged, never "
                  "scored as zero</li>" % m["unjudged_total"])
     if m["verdicts_on_gt_gap_pages"]:

@@ -208,3 +208,30 @@ class TestWatchdog:
     def test_zero_seconds_disables_it(self):
         with G._watchdog(0):
             pass
+
+
+class TestChallengeWordingVaries:
+    """Challenge screens do not all say "checking your browser".
+
+    Large sites ask whether you are a robot, or report unusual activity with a reference
+    id. Missing those wordings lets a challenge page become the reference every provider
+    is compared against — and it renders perfectly, so nothing else catches it.
+    """
+
+    def test_a_robot_question_in_the_title_is_a_wall(self):
+        assert G.gt_is_walled("", "Bloomberg - Are you a robot?") == ["challenge"]
+
+    def test_an_access_denial_in_the_title_is_a_wall(self):
+        assert G.gt_is_walled("", "Access to this page has been denied") == ["challenge"]
+
+    def test_unusual_activity_wording_is_a_wall(self):
+        body = "We've detected unusual activity from your computer network"
+        assert G.gt_is_walled(body, "") == ["challenge"]
+
+    def test_the_classic_wording_still_matches(self):
+        assert G.gt_is_walled("", "Just a moment...") == ["challenge"]
+
+    def test_a_real_page_is_not_flagged(self):
+        """The patterns must not fire on ordinary technology coverage."""
+        assert G.gt_is_walled("Latest technology news and analysis from around the world",
+                              "Bloomberg Technology") == []

@@ -20,11 +20,10 @@ python -m src.fetch_run \
     --pageset data/fetch_pageset.gt.jsonl \
     --providers octen exa tavily firecrawl trafilatura readability \
     --out results/fetch_<date> --concurrency 6 --timeout 60 \
-    --pace octen=2.5,firecrawl=6.5 \
-    --repeat 3
+    --pace octen=2.5,firecrawl=6.5
 
-# 2) Judge: mechanical layer plus a three-model panel. Human gold has the highest
-#    priority and is read automatically from data/fetch_gold_gap.jsonl.
+# 2) Judge: mechanical layer plus a three-model panel.
+#    Each provider is judged on its own return; nothing is compared side by side.
 python -m scripts.fetch_score_run \
     --extractions results/fetch_<date>/extractions.jsonl \
     --pageset data/fetch_pageset.gt.jsonl \
@@ -44,11 +43,11 @@ cadence, and an unpaced round measures their rate limits rather than their fetch
 capability. The pacing actually used is recorded in `run_meta.json` and stated in the
 report, so the latency caveat is always true for the round it describes.
 
-**Run more than one round.** On defended pages the result varies from call to call: the
-same URL can return the article on one attempt and a challenge screen on the next. With
-`--repeat`, the report takes the **median** verdict per cell and also prints the
-best/worst envelope, so a reader can tell whether a few points between two providers is a
-real difference or round-to-round noise. A single round is one roll of the dice.
+**One round is what the report is built from.** On defended pages a provider's result
+can vary between calls, so a single round carries that variance: two providers a few
+points apart are not separated by it, and the report says so rather than letting the
+ordering speak for itself. `--repeat N` runs each cell N times and scores the per-cell
+median instead, for the rare case where a close ordering has to be settled.
 
 ---
 
@@ -63,8 +62,8 @@ real difference or round-to-round noise. A single round is one roll of the dice.
 | Document files by format | pdf / docx / xlsx / pptx / csv / json / xml / rss / atom / txt / md |
 | Robustness probes | oversize · url_quirk · raw_direct · redirect · empty_thin · encoding · plain_http |
 
-Three supporting sections accompany them: **why it was not retrieved** (nine failure
-reasons crossed with three fault owners), **diagnostic columns** that never enter the
+Three supporting sections accompany them: **why it was not retrieved** (the failure
+taxonomy crossed with three fault owners), **diagnostic columns** that never enter the
 score, and **metric definitions plus methodology notes** written for a non-technical
 reader.
 
@@ -87,12 +86,20 @@ mechanical verdict. **Conclusions the mechanical layer is certain of are never s
 review** — wrong page, mojibake, transport failure. The evidence there is hard, and a
 transport failure has no text for a panel to look at anyway.
 
-**Pages with no reference answer are judged whole**: every provider's return is shown side
-by side with the provider names hidden behind A/B/C labels, and the prompt is adversarial
-("default to a failure verdict without positive evidence"). This is both more accurate
-than judging each provider alone and cheaper, since N providers cost one call.
+**Each provider is judged on its own return, and only its own.** The panel never sees
+what another provider produced for the same page. Showing them side by side would let the
+best return set the bar for the rest, which measures relative completeness rather than
+whether each one got the page — a different question, and not the one the metric asks.
 
-**Priority**: human gold > a terminal mechanical verdict > the panel > a mechanical band.
+**Some providers classify the page they fetched**, and the honesty flag consumes that.
+A label such as "No Main Content" or "Index Page" is the provider's own statement that
+what came back is not the article at this URL; returning body text anyway presents a
+non-page as the page. Two rules keep it fair: it is **evidence, never a score** — it can
+only add the honesty flag, never set a verdict — and it only ever counts *against* the
+provider, so shipping the field can never improve a number. A long body overrides a
+"No Main Content" label, which is a measured false negative on substantial articles.
+
+**Priority**: a terminal mechanical verdict > the panel > a mechanical band.
 
 ---
 
@@ -116,27 +123,7 @@ genuinely retrieved the content as lost.
 
 ---
 
-## 5. The human review loop
-
-Cells on pages with no reference are the weakest evidence in the set. The review page
-lists every provider's return side by side and lets a person mark each cell:
-
-```bash
-python -m scripts.fetch_review_page --pageset ... --extractions ... --verdicts ... \
-    --out review.html
-# Mark them on the page, click Export, save as marks.jsonl, then:
-python -m scripts.fetch_gold_ingest --marks marks.jsonl --extractions ... \
-    --out data/fetch_gold_gap.jsonl
-```
-
-Gold carries a **content fingerprint guard**: once a new round changes what a provider
-returned, that gold entry expires automatically — a person judged one specific payload.
-`unsure` is never written to gold. A reviewed cell stops counting towards the
-low-confidence share, so the warning actually clears once the work is done.
-
----
-
-## 6. Credentials
+## 5. Credentials
 
 Read from environment variables only; a missing key fails hard. **The runner refuses to
 start when `.env` and the shell environment disagree.** `_load_dotenv` uses `setdefault`
@@ -166,7 +153,7 @@ determined, report that it cannot be determined.**
 
 ---
 
-## 7. Provider wiring
+## 6. Provider wiring
 
 | Provider | Endpoint | Notes |
 |---|---|---|
@@ -188,7 +175,7 @@ fetch capability. The step is declared in the report through `output_form`.
 
 ---
 
-## 8. Code map
+## 7. Code map
 
 ```
 src/fetch_spec.py       page types, anti-bot sub-classes, probes, thresholds;
@@ -201,17 +188,13 @@ src/fetch_gt.py         ground truth: parse channel, browser channel, vocabulary
 src/fetch_run.py        the fetch round (row-by-row persistence, resumable, per-provider
                         pacing)
 src/fetch_io.py         durable append and progress reporting
-src/fetch_score.py      the two hard vetoes, the success gate, cross-provider judging,
-                        human gold
+src/fetch_score.py      the two hard vetoes, the success gate, the blind panel, the
+                        provider self-report check
 scripts/fetch_pageset_build.py   CSV -> page set
 scripts/fetch_gt_build.py        build ground truth
                                  (--channel playwright_headless | chrome_real)
 scripts/fetch_weak_anchors.py    identity anchors for gap pages, from a neutral SERP
 scripts/fetch_score_run.py       judging driver
-scripts/fetch_reclassify.py      reclassify failure attribution offline; the original
-                                 error text is stored, so nothing is re-fetched
-scripts/fetch_gold_ingest.py     human marks -> gold
-scripts/fetch_review_page.py     the human review page
 scripts/fetch_report.py          the report (Markdown, JSON and a standalone HTML page)
 ```
 
@@ -222,7 +205,7 @@ does not escape. A single record then gets torn in half and surfaces as a baffli
 
 ---
 
-## 9. Load-bearing rules (read before changing anything)
+## 8. Load-bearing rules (read before changing anything)
 
 These are not style preferences. Each one exists because its absence produced a wrong
 number.
@@ -249,6 +232,13 @@ honestly, and a cell that cannot be judged is left genuinely blank — in neithe
 numerator nor the denominator. Converting "we could not judge this" into "the provider
 failed" charges the limits of the judging system to the provider.
 
+**Retry the delivery, never the answer.** Our own connection to a provider dropping is a
+delivery problem, and it is retried. A provider replying "I tried and could not reach the
+target" is its result, and it is not: measured across rounds that answer is stable, so
+retrying buys three calls and the same outcome while laundering "could not retrieve" into
+"retrieved". The same rule already governs an HTTP 200 with an empty body. That is why
+`timeout_upstream` and `target_unreachable` are separate reasons rather than one.
+
 **`harness` must stay a separate fault.** An exhausted account, our own size cap, our own
 parser crashing — these are ours. Folded into a provider's failure count, someone else
 carries our mistakes.
@@ -273,7 +263,7 @@ reference only" into "bigger is better".
 
 ---
 
-## 10. The page set
+## 9. The page set
 
 The URL list lives in `data/datasets/fetch/eval_urls.csv`, whose six categories map onto
 the five page types. The mapping is transcribed once, in `src/fetch_spec.py`, and asserted

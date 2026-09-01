@@ -49,6 +49,31 @@ def _import(name: str):
         return None
 
 
+_OOXML_MARKERS = (("xl/", "xlsx"), ("word/", "docx"), ("ppt/", "pptx"))
+
+
+def _ooxml_kind(raw: bytes) -> str | None:
+    """Identify an OOXML document by looking inside the archive.
+
+    A URL with no suffix and no useful content-type leaves the magic bytes saying only
+    "this is a zip". Without this step the type stays unresolved, no parser matches, and
+    the bytes fall through to the text reader — which turns the archive's own entry names
+    (`xl`, `rels`, `PK`) into the page's vocabulary. Anything then compared against that
+    vocabulary is being measured against the container, not the document.
+    """
+    import io
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            names = z.namelist()
+    except Exception:                            # noqa: BLE001  not a readable archive
+        return None
+    for prefix, kind in _OOXML_MARKERS:
+        if any(n.startswith(prefix) for n in names):
+            return kind
+    return None
+
+
 def sniff_doc_type(raw: bytes, content_type: str, declared: str) -> tuple[str, str]:
     """Return (doc_type, rule_name). Three levels: magic bytes > content-type > URL.
 
@@ -64,6 +89,9 @@ def sniff_doc_type(raw: bytes, content_type: str, declared: str) -> tuple[str, s
                 # docx/xlsx/pptx are all zips; magic bytes alone cannot separate them
                 if declared in _ZIP_KINDS:
                     return declared, "declared_zip"
+                inner = _ooxml_kind(raw)
+                if inner:
+                    return inner, "zip_entries"
                 return "zip", "magic_bytes"
             return kind, "magic_bytes"
     ct = (content_type or "").split(";")[0].strip().lower()
@@ -104,7 +132,14 @@ def parse_document(raw: bytes, doc_type: str, url: str) -> dict:
     """Parse one non-HTML document into Markdown text. **Failure returns a rule name;
     it never raises.**"""
     try:
-        return _PARSERS.get(doc_type, _parse_text)(raw, doc_type)
+        parser = _PARSERS.get(doc_type)
+        if parser is None:
+            # **A type with no parser is not decoded as text.** Reading an archive or any
+            # other binary as UTF-8 produces a "successful" parse whose vocabulary is the
+            # container's internals, and every provider is then scored against that.
+            # Failing loudly here surfaces as a ground-truth gap, which is the truth.
+            return _fail(doc_type, "no_parser_for_type")
+        return parser(raw, doc_type)
     except Exception:                            # noqa: BLE001
         return _fail(doc_type, "parse_failed")
 
@@ -199,9 +234,7 @@ def _parse_pptx(raw: bytes, doc_type: str) -> dict:
 
 
 def _parse_text(raw: bytes, doc_type: str) -> dict:
-    s = raw.decode("utf-8", "replace")
-    lines = [l for l in s.splitlines() if l.strip()]
-    return _ok(s, doc_type)
+    return _ok(raw.decode("utf-8", "replace"), doc_type)
 
 
 _PARSERS = {

@@ -122,3 +122,45 @@ class TestFailureIsRecordedNotRaised:
     def test_txt_and_md_pass_through(self):
         got = G.parse_document("line one\nline two\n".encode(), "txt", "u")
         assert "line one" in got["text"]
+
+
+class TestBinaryNeverBecomesText:
+    """A binary the parsers cannot handle must fail loudly.
+
+    Decoding one as UTF-8 produces a "successful" parse whose vocabulary is the
+    container's own internals, and every provider is then scored against that instead of
+    the document. The symptom is silent: the page looks like it has ground truth.
+    """
+
+    def _zip(self, *names):
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for n in names:
+                z.writestr(n, "<x/>")
+        return buf.getvalue()
+
+    def test_a_suffixless_spreadsheet_is_identified_from_its_entries(self):
+        """No suffix and no content-type leaves the magic bytes saying only "zip"."""
+        raw = self._zip("xl/workbook.xml", "_rels/.rels")
+        assert G.sniff_doc_type(raw, "", "unknown") == ("xlsx", "zip_entries")
+
+    def test_the_same_holds_for_documents_and_decks(self):
+        assert G.sniff_doc_type(self._zip("word/document.xml"), "", "unknown") \
+            == ("docx", "zip_entries")
+        assert G.sniff_doc_type(self._zip("ppt/presentation.xml"), "", "unknown") \
+            == ("pptx", "zip_entries")
+
+    def test_a_plain_archive_stays_unresolved(self):
+        assert G.sniff_doc_type(self._zip("notes.txt"), "", "unknown") \
+            == ("zip", "magic_bytes")
+
+    def test_a_type_with_no_parser_fails_instead_of_decoding_bytes(self):
+        got = G.parse_document(self._zip("notes.txt"), "zip", "u")
+        assert got["rule"] == "no_parser_for_type"
+        assert got["text"] == "", "archive internals must not become the page text"
+
+    def test_a_declared_type_still_wins_over_the_entries(self):
+        raw = self._zip("xl/workbook.xml")
+        assert G.sniff_doc_type(raw, "", "xlsx") == ("xlsx", "declared_zip")

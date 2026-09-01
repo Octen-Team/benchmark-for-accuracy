@@ -309,7 +309,7 @@ class TestGlossaryTravelsWithTheReport:
     def test_single_round_runs_say_so_instead_of_staying_silent(self):
         """Silence would let a one-round number be read as though it were stable."""
         md = R.render_markdown(R.aggregate([verd("p1", "a", "pass")], [page("p1")]))
-        assert "Only one round was run" in md
+        assert "One round." in md and "not separated by it" in md
 
     def test_freshness_blind_spot_is_always_stated(self):
         """Some providers serve content from an index — retrieved, but possibly stale.

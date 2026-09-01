@@ -69,7 +69,9 @@ def test_removed_enums_stay_removed():
 
 def test_enums_are_the_declared_sets():
     assert S.EXPECT == frozenset({"content", "error", "redirect_final"})
-    assert len(S.FAILURE_REASONS) == 9
+    assert len(S.FAILURE_REASONS) == 10
+    assert "target_unreachable" in S.FAILURE_REASONS, \
+        "the provider failing to reach the target is its own answer, not our timeout"
     assert S.FAULTS == ("harness", "provider", "page")
     assert "our_size_cap" in S.FAILURE_REASONS
 

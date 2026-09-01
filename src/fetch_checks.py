@@ -28,8 +28,16 @@ _MOJIBAKE = re.compile("[\u00c2-\u00ef][\u0080-\u00bf]")
 _REPLACEMENT = "\ufffd"
 
 _WALL_PATTERNS = {
+    # Challenge screens vary in wording far more than the vendor names suggest. Several
+    # large sites never say "checking your browser" at all; they ask whether you are a
+    # robot, or report unusual activity with a reference id. A pattern set that misses
+    # those lets a challenge page become the reference every provider is compared against.
     "challenge": r"checking your browser|just a moment|verify you are human"
-                 r"|enable javascript and cookies",
+                 r"|enable javascript and cookies"
+                 r"|are you a robot|not a robot|is this you"
+                 r"|detected unusual activity|unusual traffic"
+                 r"|your (browser|request) .{0,30}(blocked|denied)"
+                 r"|security check|access to this page has been denied",
     "captcha": r"\bcaptcha\b|recaptcha|hcaptcha",
     "login": r"log in to continue|sign in to continue|create an account to",
     "paywall": r"subscribe to (read|continue)|this article is for subscribers",

@@ -111,3 +111,15 @@ def test_limit_is_deterministic_by_pid(tmp_path, monkeypatch):
 def test_pace_spec_parses():
     assert R._parse_pace("octen=2.5,firecrawl=6.5") == {"octen": 2.5, "firecrawl": 6.5}
     assert R._parse_pace(None) == {}
+
+
+def test_only_our_own_transport_failures_are_retried():
+    """Retrying the provider's own answer would launder "could not retrieve" into
+    "retrieved". Measured across rounds, a target it cannot reach stays unreachable, so
+    the retries buy nothing but time."""
+    assert "timeout_upstream" in R.RETRY_REASONS, "our connection dropping is worth retrying"
+    assert "rate_limited" in R.RETRY_REASONS
+    assert "target_unreachable" not in R.RETRY_REASONS, \
+        "the provider answered; retrying its answer is not measurement"
+    assert "nothing_extractable" not in R.RETRY_REASONS
+    assert "anti_bot_blocked" not in R.RETRY_REASONS

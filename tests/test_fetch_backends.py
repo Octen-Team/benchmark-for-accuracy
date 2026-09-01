@@ -378,6 +378,30 @@ class TestPolicyRefusalVsRealBlock:
             "with no stated reason, the status code decides"
         assert B.classify_body(403, "") is None
 
+    def test_unreachable_target_is_named_not_left_unexplained(self):
+        """A provider that says it could not reach the target has stated its reason.
+        Leaving that in `other` hides a whole class of failure from the attribution
+        table."""
+        body = ('{"error":{"code":"FETCH_TARGET_UNREACHABLE","message":"The target URL '
+                'could not be reached (connection failed or timed out)"}}')
+        assert B.classify_body(400, body) == ("target_unreachable", "provider")
+
+    def test_our_own_transport_failure_is_a_different_reason(self):
+        """Whose failure it is decides whether retrying is honest: our connection to the
+        provider dropping is a delivery problem, the provider failing to reach the target
+        is its answer."""
+        import requests
+        assert B._classify_exc(requests.Timeout())[0] == "timeout_upstream"
+        assert B._classify_exc(requests.ConnectionError())[0] == "timeout_upstream"
+
+    def test_unsupported_content_type_is_named(self):
+        assert B.classify_body(
+            400, '{"error":{"code":"FETCH_UNSUPPORTED_CONTENT_TYPE"}}'
+        ) == ("content_type_or_404", "provider")
+
+    def test_a_body_with_no_stated_reason_defers_to_the_status_code(self):
+        assert B.classify_body(500, "internal server error") is None
+
     def test_403_is_split_at_the_http_classifier(self, monkeypatch):
         monkeypatch.setenv("FIRECRAWL_API_KEY", "fk")
         _capture(monkeypatch, _Resp(status=403, text='{"error":"we do not support this site"}'))

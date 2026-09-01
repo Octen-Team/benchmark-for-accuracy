@@ -73,6 +73,24 @@ _POLICY_REFUSAL = re.compile(
     r"|we (don't|do not) (allow|scrape)", re.I)
 
 
+# The provider reached out and could not get there: a connection failure or a timeout
+# against the target. Lumping this into `other` hides a whole class of failure from the
+# attribution table.
+#
+# **This is not retried, and `timeout_upstream` is.** The difference is whose failure it
+# is. `timeout_upstream` covers our own connection to the provider dropping — a delivery
+# problem, and retrying is right. This one is the provider's answer: it tried and could
+# not get there. Measured across rounds, that answer is stable, so retrying it buys three
+# calls and the same result while laundering "could not retrieve" into "retrieved".
+_UNREACHABLE = re.compile(
+    r"target_unreachable|could not be reached|connection (failed|refused|reset)"
+    r"|timed? ?out", re.I)
+
+# The provider fetched something and refuses to handle its content type.
+_BAD_CONTENT_TYPE = re.compile(
+    r"unsupported_content_type|unsupported content[- ]type|cannot parse content type", re.I)
+
+
 # Some providers wrap "the site banned us" in a custom status code. Left in `other`, a
 # genuine block reads as an unexplained error, and those mean different things in the
 # attribution table.
@@ -85,8 +103,10 @@ def classify_body(code: int, body: str) -> tuple[str, str] | None:
     the status code has to decide.
 
     The two categories mean different things in the attribution table:
-      blocklisted_domain  it will not fetch this domain for you — a policy choice
-      anti_bot_blocked    it tried and the target site blocked it — a capability gap
+      blocklisted_domain   it will not fetch this domain for you — a policy choice
+      anti_bot_blocked     it tried and the target site blocked it — a capability gap
+      target_unreachable   it tried and could not reach the target at all
+      content_type_or_404  it reached the target and will not handle what came back
     """
     if not body:
         return None
@@ -94,6 +114,10 @@ def classify_body(code: int, body: str) -> tuple[str, str] | None:
         return "blocklisted_domain", "provider"
     if _SITE_BAN.search(body):
         return "anti_bot_blocked", "provider"
+    if _UNREACHABLE.search(body):
+        return "target_unreachable", "provider"
+    if _BAD_CONTENT_TYPE.search(body):
+        return "content_type_or_404", "provider"
     return None
 
 
@@ -209,6 +233,16 @@ class _HttpFetcher(FetchProvider):
     def _pluck(self, data: dict) -> str:
         raise NotImplementedError
 
+    def _meta(self, data: dict) -> dict:
+        """What the provider says about the page it just fetched.
+
+        Only some providers ship anything here. Their own account of the result is
+        evidence about whether the return is the requested page, so it is recorded rather
+        than discarded. It is **evidence, never a score**: a provider grading its own
+        fetch is not a measurement.
+        """
+        return {}
+
     def fetch(self, url: str, timeout: int = DEFAULT_TIMEOUT) -> FetchResponse:
         key = self._key()                       # a missing key raises here, never swallowed
         if not self.endpoint:
@@ -251,9 +285,9 @@ class _HttpFetcher(FetchProvider):
             return self._fail(url, t0, error=f"field mapping failed: {type(e).__name__}: {e}",
                               reason="normalizer_crashed", fault="harness",
                               http_status=r.status_code)
-        meta = {}
+        meta = self._meta(data)
         if self.output_form == "html" and text:
-            meta = {"output_form": "html", "raw_len": len(text)}
+            meta.update({"output_form": "html", "raw_len": len(text)})
             text = html_to_text(text)
         return self._finish(url, text, t0, http_status=r.status_code, raw_meta=meta)
 
@@ -279,6 +313,22 @@ class OctenFetcher(_HttpFetcher):
     def _pluck(self, data):
         res = (data.get("data") or {}).get("results") or []
         return (res[0].get("full_content") or res[0].get("text") or "") if res else ""
+
+    def _meta(self, data):
+        """This provider classifies the page it fetched. `page_structure.primary` values
+        such as "No Main Content" or "Index Page" are its own statement that what came
+        back is not the article at this URL, which is exactly what the honesty check is
+        trying to establish."""
+        res = (data.get("data") or {}).get("results") or []
+        if not res:
+            return {}
+        r = res[0]
+        ps = r.get("page_structure")
+        return {k: v for k, v in {
+            "provider_status": r.get("status"),
+            "page_structure": (ps.get("primary") if isinstance(ps, dict) else ps),
+            "provider_title": r.get("title"),
+        }.items() if v}
 
 
 class FirecrawlFetcher(_HttpFetcher):

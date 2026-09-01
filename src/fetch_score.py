@@ -54,8 +54,10 @@ def effective_gt(page: dict) -> dict:
                                         friends), **never the content vocabulary**.
                                         Identity is still decidable ("is this that
                                         page?"); completeness is not.
-      No anchors at all                 return empty; only the cross-provider panel can
-                                        judge these.
+      No anchors at all                 return empty. The panel then rules on the
+                                        fetched content alone, which is the weakest
+                                        evidence in the set — those cells are counted
+                                        and reported as such.
     """
     gt = page.get("gt") or {}
     if not gt.get("gt_gap"):
@@ -79,6 +81,58 @@ def run_checks(page: dict, resp: dict) -> dict:
         "wall_hit": C.wall_hit(text),
         "degenerate": bool(gt.get("degenerate")),
     }
+
+
+# Structural labels a provider may report about the page it just fetched.
+#
+# **"Index Page" is not on its own evidence of anything.** Plenty of URLs in a page set
+# genuinely are listings — a shop category, a forum board, a reviews index — and labelling
+# one as such is correct and honest. Used as a standalone trigger it flags those as
+# dishonest while the extraction is perfectly good. It is meaningful only as
+# corroboration, once something else has established the content is not the page.
+_CORROBORATES = ("Index Page", "Search Results", "Error Page")
+
+# "No Main Content" is self-contained: the provider is saying the page has no body, so
+# returning a small body as that page's content presents a shell as the page.
+_SHELL = "No Main Content"
+
+# A long body outweighs the label. Providers mislabel substantial articles as having no
+# main content, and treating the label as final there would mark a real retrieval
+# dishonest. Above this many characters the body wins.
+SELF_REPORT_OVERRIDE_LEN = 2000
+
+
+def self_reported_structure(resp: dict) -> str | None:
+    """The provider's own structural label, when it ships one. Most do not."""
+    return ((resp.get("raw_meta") or {}).get("page_structure")) or None
+
+
+def self_report_says_not_the_page(page: dict, resp: dict, verdict: str | None) -> bool:
+    """Does the provider's own label say the return is not this page?
+
+    **Evidence, not a score.** It never sets a verdict — a provider grading its own fetch
+    is not a measurement — and it only ever adds the honesty flag, so shipping the field
+    can never improve a number.
+
+    Two paths, because the labels establish different things on their own:
+
+      "No Main Content" + a small body   self-contained: the provider says the page has no
+                                         body, and returned one anyway.
+      "Index Page" and friends           corroboration only, and only on a cell already
+                                         judged lost. A listing URL is legitimately a
+                                         listing, so the label alone proves nothing.
+    """
+    if page.get("expect", "content") != "content":
+        return False
+    label = self_reported_structure(resp)
+    text = resp.get("text") or ""
+    if not label or not text.strip():
+        return False                      # nothing was presented as content
+    if label.startswith(_SHELL):
+        return len(text) <= SELF_REPORT_OVERRIDE_LEN
+    if any(label.startswith(x) for x in _CORROBORATES):
+        return verdict == _LOST
+    return False
 
 
 def _band(value: float | None, ok: float, lost: float) -> str | None:
@@ -351,65 +405,18 @@ def aggregate_votes(votes: dict[str, dict]) -> dict:
     return {"verdict": top, "panel_split": False, "dishonest": dis, "votes": votes}
 
 
-class GoldStore:
-    """Human-verified verdicts. **Highest priority**, overriding both the mechanical
-    layer and the panel.
+def _apply_self_report(out: dict, page: dict, resp: dict) -> None:
+    """Fold the provider's own label into the honesty flag, once the verdict is settled.
 
-    Guarded by `text_sha`: if the fetched text changed (a new round was run), the gold
-    entry expires automatically. A person judged one specific payload, and that judgement
-    does not carry over to a different one.
+    Applied last, because the corroborating labels only mean something against a decided
+    verdict — and never subtractively: a flag the returned text already earned stands.
     """
-
-    def __init__(self, path: str | Path | None):
-        self.by_key: dict[tuple[str, str], dict] = {}
-        if not path:
-            return
-        p = Path(path)
-        if not p.exists():
-            return
-        for line in p.read_text(encoding="utf-8").split("\n"):
-            if not line.strip():
-                continue
-            try:
-                r = json.loads(line)
-            except Exception:                    # noqa: BLE001
-                continue
-            if r.get("verdict") in WEIGHT:
-                self.by_key[(r["pid"], r["provider"])] = r
-
-    def lookup(self, page: dict, resp: dict, provider: str | None = None) -> str | None:
-        """An explicit `provider` wins. The cross-provider path keys by dict entry, so
-        if the payload's own provider field disagrees, the lookup would return another
-        provider's gold."""
-        r = self.by_key.get((page.get("pid"), provider or resp.get("provider")))
-        if not r:
-            return None
-        want = r.get("text_sha")
-        if want:
-            got = hashlib.sha256((resp.get("text") or "")
-                                 .encode("utf-8", "replace")).hexdigest()[:16]
-            if got != want:
-                return None                      # text changed; the gold no longer applies
-        return r["verdict"]
-
-    def __len__(self) -> int:
-        return len(self.by_key)
-
-
-def _apply_gold(rec: dict, page: dict, resp: dict, gold, provider: str | None = None) -> bool:
-    v = gold.lookup(page, resp, provider) if gold else None
-    if v is None:
-        return False
-    rec["verdict"] = v
-    rec["reason"] = "human_gold"
-    rec["dishonest"] = rec["dishonest"] and v == _LOST
-    rec["panel"] = None
-    rec["panel_split"] = False
-    return True
+    if self_report_says_not_the_page(page, resp, out.get("verdict")):
+        out["dishonest"] = True
 
 
 def score_one(page: dict, resp: dict, panel: list[str] | None = None, *,
-              cache: PanelCache | None = None, gold: "GoldStore | None" = None) -> dict:
+              cache: PanelCache | None = None) -> dict:
     """The full verdict for one cell: mechanical layer, then the panel if needed."""
     ch = run_checks(page, resp)
     mech = mechanical_verdict(page, resp, ch)
@@ -422,14 +429,13 @@ def score_one(page: dict, resp: dict, panel: list[str] | None = None, *,
            "latency_ms": resp.get("latency_ms"), "len_norm": ch["len_norm"],
            "failure_reason": resp.get("failure_reason"), "fault": resp.get("fault"),
            "run_seq": resp.get("run_seq", 0)}
-    if _apply_gold(out, page, resp, gold):
-        return out                               # human verdict wins; skip the panel
     clean_pass = mech["verdict"] == _PASS and not mech["needs_panel"]
     if clean_pass or mech.get("final") or not panel:
         if out["verdict"] is None:
             # No panel and no mechanical basis: leave it genuinely unjudged.
             # **It is not scored as 0.**
             out["reason"] = mech["reason"] + "|unjudged"
+        _apply_self_report(out, page, resp)
         return out
     pv = panel_verdict(page, resp, ch, panel, cache=cache)
     out["panel"] = pv
@@ -438,178 +444,9 @@ def score_one(page: dict, resp: dict, panel: list[str] | None = None, *,
         out["verdict"] = pv["verdict"]
         out["dishonest"] = out["dishonest"] or pv["dishonest"]
         out["reason"] = "panel"
+    _apply_self_report(out, page, resp)
     return out
 
 
 assert set(_TYPE_RUBRIC) == {"content", "render", "antibot"}
 assert set(_RUBRIC_FOR.values()) <= set(_TYPE_RUBRIC)
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# Cross-provider judging, for pages that have no reference answer
-# ══════════════════════════════════════════════════════════════════════════
-
-CROSS_TEXT_BUDGET = 2200          # characters shown per provider (several must fit)
-
-CROSS_SYSTEM = """Several different services each tried to fetch the SAME web page.
-You are shown what each returned. We could not fetch this page ourselves, so there is no
-reference answer -- but you have the returns side by side, and that is the point: if any of
-them got the real page, the ones that did not will stand out against it.
-
-For each labelled return, decide:
-
-  pass     this is the substantive content of that URL
-  partial  part of it: a wall-front excerpt, a fragment, a partial render
-  lost     not the page: a bot-check or login or subscribe screen, an error page, an empty
-           shell, a DIFFERENT page (the site's home page, a listing, an onboarding screen),
-           raw unrendered payload (HTML source, a `%PDF ... stream` byte dump), or garbled text
-
-**Default to `lost`.** Only move a return up when there is positive evidence it is this
-specific page's own content -- matching topic, matching entity, detail that could only come
-from this URL. Length is not evidence. Tidiness is not evidence. Looking generally
-web-like is not evidence.
-
-We are grading FETCH CAPABILITY, not parsing: missing sections, lost tables and stripped
-formatting do NOT lower a verdict.
-
-Output JSON only, one entry per label you were shown:
-{"verdicts": {"A": {"verdict": "pass|partial|lost", "dishonest": true|false,
-                    "why": "<one short clause>"}, "B": {...}}}
-"dishonest" is true when the return presents a wall, an error, or a different page AS IF it
-were the requested content."""
-
-
-def _cross_order(pid: str, providers: list[str]) -> list[str]:
-    """Label order is derived from a hash of (pid, provider): **stable, but different on
-    every page.**
-
-    A fixed order would land the panel's position bias on the same provider every time;
-    a random order would not be reproducible.
-    """
-    return sorted(providers,
-                  key=lambda p: hashlib.sha256((pid + "|" + p).encode()).hexdigest())
-
-
-def cross_user(page: dict, resps: dict[str, dict]) -> tuple[str, dict[str, str]]:
-    """Return (user prompt, label -> provider). **Provider names are hidden**, or the
-    models' brand priors leak into the verdict — and these are exactly the pages where
-    only the content should count."""
-    gt = page.get("gt") or {}
-    order = _cross_order(page["pid"], sorted(resps))
-    label_of = {}
-    parts = ["URL: %s" % page.get("url", "")]
-    if gt.get("serp_title"):
-        parts.append("Title, from a neutral search engine's index: %s" % gt["serp_title"])
-    if gt.get("serp_snippet"):
-        parts.append("Search-engine snippet: %s" % gt["serp_snippet"])
-    if page.get("antibot_subclass"):
-        parts.append("This page is behind a %s." % page["antibot_subclass"])
-    for i, prov in enumerate(order):
-        label = chr(ord("A") + i)
-        label_of[label] = prov
-        r = resps[prov]
-        if r.get("status") == "error":
-            body = "(the service reported an error: %s)" % (r.get("failure_reason") or "error")
-        else:
-            body = (r.get("text") or "")[:CROSS_TEXT_BUDGET] or "(empty)"
-        parts.append("\n--- RETURN %s (%d chars total) ---\n%s"
-                     % (label, len(r.get("text") or ""), body))
-    return "\n".join(parts), label_of
-
-
-def cross_cache_key(page: dict, resps: dict[str, dict], model: str) -> str:
-    h = hashlib.sha256()
-    h.update((page.get("pid", "") + "|cross|" + RUBRIC_VERSION + "|" + model).encode())
-    for prov in sorted(resps):
-        h.update(prov.encode())
-        h.update((resps[prov].get("text") or "")[:CROSS_TEXT_BUDGET].encode("utf-8", "replace"))
-        h.update(b"\x00")
-    return h.hexdigest()[:16]
-
-
-def panel_cross(page: dict, resps: dict[str, dict], panel: list[str], *,
-                cache: PanelCache | None = None, max_tokens: int = 1200) -> dict:
-    """Judge every provider for one page in a single call. Returns {provider: verdict}.
-
-    This is both **more accurate and cheaper** than judging each provider alone: more
-    accurate because the side-by-side comparison exposes the wrong answers as soon as one
-    provider genuinely got the page, and cheaper because N providers cost one call
-    instead of N.
-    """
-    from .llm import call_llm_json
-    user, label_of = cross_user(page, resps)
-    per_model: dict[str, dict] = {}
-    for model in panel:
-        key = cross_cache_key(page, resps, model)
-        hit = cache.get(key) if cache else None
-        if hit is not None:
-            per_model[model] = hit
-            continue
-        try:
-            raw = call_llm_json(CROSS_SYSTEM, user, model=model,
-                                max_tokens=max_tokens, temperature=0.0)
-            got = raw.get("verdicts") or {}
-            v = {label_of[k]: {"verdict": (val.get("verdict") or "").strip(),
-                               "dishonest": bool(val.get("dishonest")),
-                               "why": (val.get("why") or "")[:160]}
-                 for k, val in got.items() if k in label_of}
-        except Exception as e:                   # noqa: BLE001
-            v = {p: {"verdict": "error", "dishonest": False,
-                     "why": "%s: %s" % (type(e).__name__, str(e)[:100])} for p in resps}
-        per_model[model] = v
-        if cache and any(x["verdict"] != "error" for x in v.values()):
-            cache.put(key, v)
-
-    out = {}
-    for prov in resps:
-        votes = {m: per_model[m].get(prov, {"verdict": "error"}) for m in per_model}
-        out[prov] = aggregate_votes(votes)
-        out[prov]["mode"] = "cross"
-    return out
-
-
-def score_page_cross(page: dict, resps: dict[str, dict], panel: list[str] | None = None,
-                     *, cache: PanelCache | None = None,
-                     gold: "GoldStore | None" = None) -> dict[str, dict]:
-    """Judge a whole page at once — for pages with **no reference answer**.
-
-    The mechanical layer still runs first and its hard vetoes remain terminal; whatever
-    is left undecided goes to the cross-provider panel, one call for the whole page.
-    """
-    out, pending = {}, {}
-    for prov, resp in resps.items():
-        ch = run_checks(page, resp)
-        mech = mechanical_verdict(page, resp, ch)
-        rec = {"pid": page["pid"], "provider": prov, "type": page["type"],
-               "antibot_subclass": page.get("antibot_subclass"),
-               "strength": (page.get("gt") or {}).get("strength"),
-               "anchor_source": (page.get("gt") or {}).get("anchor_source"),
-               "checks": ch, "mechanical": mech, "verdict": mech["verdict"],
-               "dishonest": mech["dishonest"], "suspicious_bypass": mech["suspicious_bypass"],
-               "reason": mech["reason"], "panel": None, "panel_split": False,
-               "latency_ms": resp.get("latency_ms"), "len_norm": ch["len_norm"],
-               "failure_reason": resp.get("failure_reason"), "fault": resp.get("fault"),
-               "run_seq": resp.get("run_seq", 0)}
-        if _apply_gold(rec, page, resp, gold, prov):
-            out[prov] = rec
-            continue                             # human verdict wins; skip cross-judging
-        clean_pass = mech["verdict"] == _PASS and not mech["needs_panel"]
-        if not (clean_pass or mech.get("final")) and panel:
-            pending[prov] = resp
-        elif rec["verdict"] is None:
-            rec["reason"] = mech["reason"] + "|unjudged"
-        out[prov] = rec
-
-    if pending and panel:
-        cross = panel_cross(page, pending, panel, cache=cache)
-        for prov, pv in cross.items():
-            rec = out[prov]
-            rec["panel"] = pv
-            rec["panel_split"] = pv["panel_split"]
-            if pv["verdict"] is not None:
-                rec["verdict"] = pv["verdict"]
-                rec["dishonest"] = rec["dishonest"] or pv["dishonest"]
-                rec["reason"] = "panel_cross"
-            elif rec["verdict"] is None:
-                rec["reason"] = rec["mechanical"]["reason"] + "|unjudged"
-    return out

@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from src.fetch_io import append, progress
-from src.fetch_score import GoldStore, PanelCache, score_one, score_page_cross
+from src.fetch_score import PanelCache, score_one
 
 
 def load_jsonl(p: Path) -> list[dict]:
@@ -62,8 +62,6 @@ def main() -> None:
                     help="mechanical layer only; spends no LLM tokens")
     ap.add_argument("--panel", nargs="+", help="override the panel models")
     ap.add_argument("--limit", type=int)
-    ap.add_argument("--gold", default="data/fetch_gold_gap.jsonl",
-                    help="human-verified verdicts, highest priority; skipped if absent")
     ap.add_argument("--concurrency", type=int, default=6,
                     help="cells judged concurrently (the three models within a cell\n                         still run in sequence)")
     a = ap.parse_args()
@@ -78,10 +76,6 @@ def main() -> None:
     done = done_keys(out)
     todo = [r for r in rows if (r["pid"], r["provider"], r.get("run_seq", 0)) not in done]
 
-    gold = GoldStore(a.gold)
-    if len(gold):
-        print("%d gold entries (human-verified, highest priority, override the panel)"
-              % len(gold))
     panel = None if a.no_panel else resolve_panel(a.panel)
     cache = None if a.no_panel else PanelCache(out.parent / "panel_cache.jsonl")
     print("%d cells to judge (of %d); panel = %s" % (len(todo), len(rows), panel or "off"))
@@ -99,46 +93,17 @@ def main() -> None:
 
     def _one(r: dict) -> dict:
         try:
-            return score_one(pages[r["pid"]], r, panel=panel, cache=cache, gold=gold)
+            return score_one(pages[r["pid"]], r, panel=panel, cache=cache)
         except Exception as e:                   # noqa: BLE001
             return _crashed(r, e)
 
-    # **Pages with no reference answer are judged whole.** Every provider's return is
-    # shown side by side, so as soon as one of them genuinely got the page the others'
-    # failures become visible. More accurate than judging each alone, and N providers
-    # cost one call instead of N.
-    gap_pids = {pid for pid, p in pages.items() if (p.get("gt") or {}).get("gt_gap")}
-    cross_todo: dict[str, dict] = {}
-    solo_todo = []
-    for r in todo:
-        if panel and r["pid"] in gap_pids and r.get("run_seq", 0) == 0:
-            cross_todo.setdefault(r["pid"], {})[r["provider"]] = r
-        else:
-            solo_todo.append(r)
-    if cross_todo:
-        print("  %d of them have no reference -> cross-judged whole "
-              "(%d cells, %d calls instead of %d)"
-              % (len(cross_todo), sum(len(v) for v in cross_todo.values()),
-                 len(cross_todo) * len(panel),
-                 sum(len(v) for v in cross_todo.values()) * len(panel)))
-
-    def _page(pid: str) -> list[dict]:
-        try:
-            return list(score_page_cross(pages[pid], cross_todo[pid], panel,
-                                         cache=cache, gold=gold).values())
-        except Exception as e:               # noqa: BLE001
-            return [_crashed(r, e) for r in cross_todo[pid].values()]
-
+    # **Each provider is judged on its own return, never alongside the others.** A
+    # side-by-side comparison would let one provider's success set the bar for the rest,
+    # which measures relative completeness rather than whether each got the page.
     t0, done_n = time.time(), 0
-    total = len(solo_todo) + sum(len(v) for v in cross_todo.values())
+    total = len(todo)
     with ThreadPoolExecutor(max_workers=a.concurrency) as ex:
-        for group in ex.map(_page, list(cross_todo)):
-            for v in group:
-                append(out, v)
-                done_n += 1
-            if (s := progress(done_n, total, t0)):
-                print(s)
-        for v in ex.map(_one, solo_todo):
+        for v in ex.map(_one, todo):
             append(out, v)
             done_n += 1
             if (s := progress(done_n, total, t0)):
