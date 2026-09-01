@@ -11,32 +11,39 @@ providers.
 
 ## 1. Running a round
 
-```bash
-pip install -r requirements-fetch.txt && python -m playwright install chromium
+The benchmark ships built. `data/datasets/fetch/pageset.gt.jsonl` holds the 100 pages
+together with the ground truth every verdict is measured against, so there is nothing to
+construct — three commands produce a report. No browser is needed on this path.
 
-# 1) Fetch. Before starting, the runner compares the credentials in .env with those in
-#    the shell environment and refuses to run if they disagree.
-python -m src.fetch_run \
-    --pageset data/fetch_pageset.gt.jsonl \
+```bash
+pip install -r requirements-fetch.txt      # optional deps; the core stays requests-only
+export RUN=results/fetch_$(date +%Y%m%d)
+export SET=data/datasets/fetch/pageset.gt.jsonl
+
+# 1) Fetch. Providers you have no key for are reported as unavailable, never scored zero,
+#    so start with whichever subset you have. Before starting, the runner compares the
+#    credentials in .env with those in the shell and refuses to run if they disagree.
+python -m src.fetch_run --pageset $SET \
     --providers octen exa tavily firecrawl trafilatura readability \
-    --out results/fetch_<date> --concurrency 6 --timeout 60 \
+    --out $RUN --concurrency 6 --timeout 60 \
     --pace octen=2.5,firecrawl=6.5
 
-# 2) Judge: mechanical layer plus a three-model panel.
-#    Each provider is judged on its own return; nothing is compared side by side.
-python -m scripts.fetch_score_run \
-    --extractions results/fetch_<date>/extractions.jsonl \
-    --pageset data/fetch_pageset.gt.jsonl \
-    --out results/fetch_<date>/verdicts.jsonl --concurrency 8
+# 2) Judge: the mechanical layer first, then a three-model panel for what it cannot
+#    settle. Each provider is judged on its own return; nothing is compared side by side.
+#    Needs an LLM key. `--no-panel` runs the mechanical layer alone, which spends nothing
+#    and is a good way to check the wiring first.
+python -m scripts.fetch_score_run --pageset $SET \
+    --extractions $RUN/extractions.jsonl \
+    --out $RUN/verdicts.jsonl --concurrency 8
 
-# 3) Report
-python -m scripts.fetch_report \
-    --verdicts results/fetch_<date>/verdicts.jsonl \
-    --pageset data/fetch_pageset.gt.jsonl \
-    --out-md results/fetch_<date>/report.md \
-    --out-html results/fetch_<date>/report.html \
-    --out-json results/fetch_<date>/agg.json
+# 3) Report: Markdown, JSON, and a standalone HTML page.
+python -m scripts.fetch_report --pageset $SET \
+    --verdicts $RUN/verdicts.jsonl \
+    --out-md $RUN/report.md --out-html $RUN/report.html --out-json $RUN/agg.json
 ```
+
+Every step appends as it goes and resumes where it stopped, so an interrupted run picks
+up rather than starting over.
 
 **Pacing is required, not optional.** Several providers reject requests above a certain
 cadence, and an unpaced round measures their rate limits rather than their fetch
@@ -48,6 +55,32 @@ can vary between calls, so a single round carries that variance: two providers a
 points apart are not separated by it, and the report says so rather than letting the
 ordering speak for itself. `--repeat N` runs each cell N times and scores the per-cell
 median instead, for the rare case where a close ordering has to be settled.
+
+**Ground truth ages.** It was captured on a particular day; pages get redesigned, articles
+get taken down, and a defence that was soft can harden. A page whose reference no longer
+matches shows up as a provider-wide failure on that one page rather than a difference
+between providers, which is the signal to rebuild.
+
+### Building your own page set
+
+Only needed to evaluate a different set of URLs. This is the path that needs a browser.
+
+```bash
+python -m playwright install chromium
+
+# A CSV with a `#,category,url` header; the six categories map onto the five page types.
+python -m scripts.fetch_pageset_build --csv your_urls.csv --out data/my_pageset.jsonl
+
+# Documents go through the parsers, everything else through a headless browser.
+# Roughly 10 minutes for 100 pages.
+python -m scripts.fetch_gt_build --pageset data/my_pageset.jsonl \
+    --out data/my_pageset.gt.jsonl --channel playwright_headless --concurrency 4
+
+# Recommended. For pages the browser could not fetch either, take the title and snippet
+# from a neutral search engine as identity anchors. Without this those cells are judged
+# with no reference at all, which is systematically lenient. Needs a SERP key.
+python -m scripts.fetch_weak_anchors --pageset data/my_pageset.gt.jsonl
+```
 
 ---
 
@@ -265,13 +298,26 @@ reference only" into "bigger is better".
 
 ## 9. The page set
 
-The URL list lives in `data/datasets/fetch/eval_urls.csv`, whose six categories map onto
-the five page types. The mapping is transcribed once, in `src/fetch_spec.py`, and asserted
-at import.
+Two files ship under `data/datasets/fetch/`:
 
-The set deliberately contains **more pages than hosts** — several hosts contribute more
-than one page — so the report also prints a **de-duplicated-by-domain** figure that
-averages within a domain first. Without it, being good at one site would count twice.
+| File | What it is |
+|---|---|
+| `pageset.gt.jsonl` | the benchmark: 100 pages with their ground truth. This is what you run against. |
+| `eval_urls.csv` | the URL list it was built from, kept so the build is reproducible and so a different set can be built the same way. |
+
+The 100 pages span 8 static docs, 18 render/SPA,
+22 document files, 42 anti-bot and 10
+robustness probes. The CSV's six categories map onto those five types; the mapping is
+transcribed once, in `src/fetch_spec.py`, and asserted at import.
+
+100 pages across **87 hosts** — several hosts contribute more than one page —
+so the report also prints a **de-duplicated-by-domain** figure that averages within a
+domain first. Without it, being good at one site would count twice.
+
+**20 pages carry no usable reference.** Our own browser is blocked on them too, so
+their vocabulary is withheld from judging and the panel rules on the fetched content
+alone. They are listed in every report, and verdicts resting on them are counted
+separately, because that is the weakest evidence the benchmark produces.
 
 Each page also carries `expect` (`content` / `error` / `redirect_final`) and `probes`
 (seven robustness probes), attached by URL substring in the spec's `PAGE_LABELS` and
