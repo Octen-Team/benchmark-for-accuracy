@@ -475,7 +475,14 @@ def _slice_table(title: str, buckets: dict, providers: list, labels: dict | None
     return L
 
 
-def render_markdown(agg: dict) -> str:
+def render_markdown(agg: dict, brief: bool = False) -> str:
+    """`brief` stops after the failure attribution.
+
+    The sections it drops — the diagnostic columns, the metric definitions and the
+    methodology notes — are reference material, and the method document already carries
+    them in full. Repeating them under every set of results makes the results harder to
+    find without making them easier to understand.
+    """
     m = agg["meta"]
     L = ["# Fetch provider capability evaluation", "",
          "**%s**" % agg["scope"], "",
@@ -531,6 +538,9 @@ def render_markdown(agg: dict) -> str:
                         else rank_of({p: agg["diagnostics"][p][field]
                                       for p in agg["providers"]}, d))
     arrow = {True: " ↑", False: " ↓", None: " —"}
+    if brief:
+        return "\n".join(L) + "\n"
+
     L += ["", "## Diagnostic columns (not part of the score)", "",
           "The superscript is the rank within the column. **↑ higher is better · "
           "↓ lower is better · — not ranked** (reasons below the table).",
@@ -906,6 +916,10 @@ def main() -> None:
     ap.add_argument("--verdicts", required=True)
     ap.add_argument("--pageset", required=True)
     ap.add_argument("--out-md")
+    ap.add_argument("--brief", action="store_true",
+                    help="stop the Markdown report after failure attribution; the "
+                         "diagnostic columns, metric definitions and methodology notes "
+                         "live in docs/benchmarks/fetch_eval.md")
     ap.add_argument("--out-json")
     ap.add_argument("--out-html")
     ap.add_argument("--run-meta",
@@ -917,7 +931,7 @@ def main() -> None:
     meta_path = Path(a.run_meta) if a.run_meta else Path(a.verdicts).parent / "run_meta.json"
     run_meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
     agg = aggregate(load_jsonl(Path(a.verdicts)), load_jsonl(Path(a.pageset)), run_meta)
-    md = render_markdown(agg)
+    md = render_markdown(agg, brief=a.brief)
     if a.out_md:
         Path(a.out_md).write_text(md, encoding="utf-8")
         print("Markdown -> %s" % a.out_md)

@@ -433,3 +433,32 @@ class TestReportDimensions:
                      "### Anti-bot pages by protection strength",
                      "### Document files by format", "### Robustness probes"):
             assert want in md, want
+
+
+class TestBriefReport:
+    """`--brief` is what produces the published results document.
+
+    It drops reference material the method document already carries in full. Repeating
+    the definitions under every set of results makes the results harder to find without
+    making them easier to understand.
+    """
+
+    def _agg(self):
+        return R.aggregate([verd("p1", "a", "pass"), verd("p2", "a", "lost")],
+                           [page("p1"), page("p2")])
+
+    def test_brief_keeps_the_results(self):
+        md = R.render_markdown(self._agg(), brief=True)
+        for want in ("## Headline: fetch success rate", "### By page type",
+                     "## Why it was not retrieved"):
+            assert want in md, want
+
+    def test_brief_drops_the_reference_material(self):
+        md = R.render_markdown(self._agg(), brief=True)
+        for gone in ("## Diagnostic columns", "## Metric definitions",
+                     "## Methodology notes"):
+            assert gone not in md, gone
+
+    def test_the_full_report_is_still_the_default(self):
+        md = R.render_markdown(self._agg())
+        assert "## Diagnostic columns" in md and "## Methodology notes" in md

@@ -37,6 +37,8 @@ python -m scripts.fetch_score_run --pageset $SET \
     --out $RUN/verdicts.jsonl --concurrency 8
 
 # 3) Report: Markdown, JSON, and a standalone HTML page.
+#    Add --brief to stop after the failure attribution, leaving the definitions to this
+#    document; that is what produced the published results file.
 python -m scripts.fetch_report --pageset $SET \
     --verdicts $RUN/verdicts.jsonl \
     --out-md $RUN/report.md --out-html $RUN/report.html --out-json $RUN/agg.json
