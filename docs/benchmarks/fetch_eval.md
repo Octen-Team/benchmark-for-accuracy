@@ -25,8 +25,7 @@ export SET=data/datasets/fetch/pageset.gt.jsonl
 #    credentials in .env with those in the shell and refuses to run if they disagree.
 python -m src.fetch_run --pageset $SET \
     --providers octen exa tavily firecrawl trafilatura readability \
-    --out $RUN --concurrency 6 --timeout 60 \
-    --pace octen=2.5,firecrawl=6.5
+    --out $RUN --concurrency 6 --timeout 60
 
 # 2) Judge: the mechanical layer first, then a three-model panel for what it cannot
 #    settle. Each provider is judged on its own return; nothing is compared side by side.
@@ -47,10 +46,12 @@ python -m scripts.fetch_report --pageset $SET \
 Every step appends as it goes and resumes where it stopped, so an interrupted run picks
 up rather than starting over.
 
-**Pacing is required, not optional.** Several providers reject requests above a certain
-cadence, and an unpaced round measures their rate limits rather than their fetch
-capability. The pacing actually used is recorded in `run_meta.json` and stated in the
-report, so the latency caveat is always true for the round it describes.
+**Rate limiting is retried, not paced around.** A 429 is retried with backoff, so a
+provider that throttles is not scored down for it. `--pace <provider>=<seconds>` exists
+for the case where a key's tier is the binding constraint and retries cannot clear it —
+but a paced provider is being given room the others did not get, and its latency then
+includes waiting we imposed. The pacing actually used is recorded in `run_meta.json` and
+stated in the report, so the caveat travels with the round that needed it.
 
 **One round is what the report is built from.** On defended pages a provider's result
 can vary between calls, so a single round carries that variance: two providers a few

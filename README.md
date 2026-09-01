@@ -164,7 +164,7 @@ export RUN=results/fetch_run
 # Fetch. A provider you have no key for is reported as unavailable, never scored zero.
 python -m src.fetch_run --pageset $SET \
     --providers octen exa tavily firecrawl trafilatura readability \
-    --out $RUN --concurrency 6 --timeout 60 --pace octen=2.5,firecrawl=6.5
+    --out $RUN --concurrency 6 --timeout 60
 
 # Judge: mechanical checks first, then a three-model blind panel for what they cannot
 # settle. Each provider is judged on its own return. --no-panel spends no LLM tokens.
@@ -176,9 +176,9 @@ python -m scripts.fetch_report --pageset $SET --verdicts $RUN/verdicts.jsonl \
     --out-md $RUN/report.md --out-html $RUN/report.html --out-json $RUN/agg.json
 ```
 
-Pacing is not optional: several providers reject requests at a faster cadence, and an
-unpaced round measures rate limits instead of fetch capability. Pages where the ground
-truth is missing or was itself blocked are reported as such rather than silently scored.
+Rate limiting is retried with backoff rather than paced around, so a provider that
+throttles is not scored down for it. Pages where the ground truth is missing or was itself
+blocked are reported as such rather than silently scored.
 
 Results from the reference run:
 [`docs/benchmarks/fetch_20260901.md`](docs/benchmarks/fetch_20260901.md).
